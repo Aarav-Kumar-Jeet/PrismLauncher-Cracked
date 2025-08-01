@@ -1,0 +1,3059 @@
+From ed689982c2a005ae55c100704a9f4f72b192596f Mon Sep 17 00:00:00 2001
+From: John Bowler <jbowler@acm.org>
+Date: Mon, 16 Sep 2024 11:53:33 -0700
+Subject: [PATCH] Update the support for target-specific code
+
+The change removes the need for build configuration of target specific
+code such as SIMD enhancements.
+
+The extensible framework is based on checks in the new file named
+pngtarget.h and allows per target description of requirements and
+capabilities using macros with the prefix PNG_TARGET_.  These macros are
+interpreted by the core libpng code in a target independent way.
+
+The PNG_TARGET_ prefixed macros describe the target specific
+implementation and document how to include it.  The actual inclusion of
+the code is done, at present, by a single target independent core file
+named pngsimd.c.
+
+This approach ensures that no special configuration in the build system
+is required on any system.  It is not required on a system which is
+compiling for the build host where we can reasonably assume that the
+compiler is correctly set up.  Neither is it required for cross builds
+so long as the toolchain is correctly set up.  In this case the
+toolchain means the cross build system and any ancilliary programs it
+requires.
+
+More details of the implementation are included in the source files
+named pngtarget.h and pngsimd.c.  These files document in C comments how
+additional target specific code might be added.
+
+The changes consist primarily of movement of target specific code from
+the core libpng source files to the existing target specific
+subdirectories such as the ones named intel and arm.  This isolates the
+code into the corresponding subdirectory and eliminates the requirement
+for changes across the libpng structure.
+
+As part of this the ARM processor NEON instruction set specific palette
+to RGB code has been generalised to allow implementation in other
+architectures.  The resultant updated version of the original (ARM Ltd)
+implementation has been moved to the subdirectory named arm.
+
+In addition some selected changes have been included to allow testing
+with higher warning levels than the typical compiler defaults.
+
+Reviewed-by: Cosmin Truta <ctruta@gmail.com>
+Signed-off-by: John Bowler <jbowler@acm.org>
+Signed-off-by: Cosmin Truta <ctruta@gmail.com>
+---
+ CMakeLists.txt                  |  49 +---
+ Makefile.am                     |  10 +-
+ arm/arm_init.c                  | 294 ++++++++++++++++--------
+ arm/check.h                     |  19 ++
+ arm/filter_neon_intrinsics.c    |  34 +--
+ arm/palette_neon_intrinsics.c   |  50 ++--
+ configure.ac                    |   9 +-
+ intel/check.h                   |  35 +++
+ intel/filter_sse2_intrinsics.c  |  29 +--
+ intel/intel_init.c              |  12 +-
+ mips/check.h                    |  25 ++
+ mips/filter_msa_intrinsics.c    |  53 ++---
+ mips/mips_init.c                | 182 +--------------
+ mips/msacheck.h                 |  26 +++
+ png.c                           |   4 -
+ png.h                           |  51 +++--
+ pngpriv.h                       | 388 +++-----------------------------
+ pngread.c                       |  17 +-
+ pngrtran.c                      |  61 +----
+ pngrutil.c                      |  23 +-
+ pngsimd.c                       | 145 ++++++++++++
+ pngstruct.h                     |  21 +-
+ pngtarget.h                     | 130 +++++++++++
+ pngtest.c                       |   1 +
+ powerpc/check.h                 |  22 ++
+ powerpc/filter_vsx_intrinsics.c |  56 ++---
+ powerpc/powerpc_init.c          | 104 +--------
+ scripts/makefile.gcc            |  43 ++--
+ scripts/makefile.std            |  35 ++-
+ scripts/pnglibconf.dfa          | 159 ++-----------
+ scripts/pnglibconf.h.prebuilt   |  11 +-
+ 31 files changed, 857 insertions(+), 1241 deletions(-)
+ create mode 100644 arm/check.h
+ create mode 100644 intel/check.h
+ create mode 100644 mips/check.h
+ create mode 100644 mips/msacheck.h
+ create mode 100644 pngsimd.c
+ create mode 100644 pngtarget.h
+ create mode 100644 powerpc/check.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 355a78dad4..a29eae47c5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -128,49 +128,6 @@ else()
+   # libm is not available or not needed.
+ endif()
+ 
+-if(PNG_HARDWARE_OPTIMIZATIONS)
+-
+-# Set definitions and sources for ARM.
+-set(libpng_arm_sources
+-    arm/arm_init.c
+-    arm/filter_neon_intrinsics.c
+-    arm/palette_neon_intrinsics.c)
+-
+-# Set definitions and sources for PowerPC.
+-set(libpng_powerpc_sources
+-    powerpc/powerpc_init.c
+-    powerpc/filter_vsx_intrinsics.c)
+-
+-# Set definitions and sources for Intel.
+-set(libpng_intel_sources
+-    intel/intel_init.c
+-    intel/filter_sse2_intrinsics.c)
+-
+-# Set definitions and sources for MIPS.
+-set(libpng_mips_sources
+-    mips/mips_init.c
+-    mips/filter_msa_intrinsics.c
+-    mips/filter_mmi_inline_assembly.c)
+-
+-# Set definitions and sources for LoongArch.
+-set(libpng_loongarch_sources
+-    loongarch/loongarch_lsx_init.c
+-    loongarch/filter_lsx_intrinsics.c)
+-
+-else(PNG_HARDWARE_OPTIMIZATIONS)
+-
+-# Disable opt for all arches
+-add_definitions(
+-  -DPNG_ARM_NEON_OPT=0
+-  -DPNG_POWERPC_VSX_OPT=0
+-  -DPNG_INTEL_SSE_OPT=0
+-  -DPNG_MIPS_MSA_OPT=0
+-  -DPNG_MIPS_MMI_OPT=0
+-  -DPNG_LOONGARCH_LSX_OPT=0
+-)
+-
+-endif(PNG_HARDWARE_OPTIMIZATIONS)
+-
+ option(ld-version-script "Enable linker version script" ON)
+ if(ld-version-script AND NOT ANDROID AND NOT APPLE)
+   # Check if LD supports linker scripts.
+@@ -481,11 +438,7 @@ set(libpng_sources
+     pngwrite.c
+     pngwtran.c
+     pngwutil.c
+-    ${libpng_arm_sources}
+-    ${libpng_intel_sources}
+-    ${libpng_mips_sources}
+-    ${libpng_powerpc_sources}
+-    ${libpng_loongarch_sources}
++    pngsimd.c
+ )
+ set(pngtest_sources
+     pngtest.c
+diff --git a/Makefile.am b/Makefile.am
+index 864670ad1d..7ef8a9d0f1 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -104,14 +104,8 @@ lib_LTLIBRARIES=libpng@PNGLIB_MAJOR@@PNGLIB_MINOR@.la
+ libpng@PNGLIB_MAJOR@@PNGLIB_MINOR@_la_SOURCES = png.c pngerror.c\
+ 	pngget.c pngmem.c pngpread.c pngread.c pngrio.c pngrtran.c pngrutil.c\
+ 	pngset.c pngtrans.c pngwio.c pngwrite.c pngwtran.c pngwutil.c\
+-	png.h pngconf.h pngdebug.h pnginfo.h pngpriv.h pngstruct.h pngusr.dfa\
+-	arm/arm_init.c arm/filter_neon_intrinsics.c\
+-	arm/palette_neon_intrinsics.c\
+-	intel/intel_init.c intel/filter_sse2_intrinsics.c\
+-	loongarch/loongarch_lsx_init.c loongarch/filter_lsx_intrinsics.c\
+-	mips/mips_init.c mips/filter_msa_intrinsics.c\
+-	mips/filter_mmi_inline_assembly.c\
+-	powerpc/powerpc_init.c powerpc/filter_vsx_intrinsics.c
++	pngsimd.c\
++	png.h pngconf.h pngdebug.h pnginfo.h pngpriv.h pngstruct.h pngusr.dfa
+ 
+ nodist_libpng@PNGLIB_MAJOR@@PNGLIB_MINOR@_la_SOURCES = pnglibconf.h
+ 
+diff --git a/arm/arm_init.c b/arm/arm_init.c
+index 84d05556f8..63281fc869 100644
+--- a/arm/arm_init.c
++++ b/arm/arm_init.c
+@@ -9,113 +9,27 @@
+  * For conditions of distribution and use, see the disclaimer
+  * and license in png.h
+  */
++#define png_target_impl "arm-neon"
+ 
+-/* This module requires POSIX 1003.1 functions. */
+-#define _POSIX_SOURCE 1
+-
+-#include "../pngpriv.h"
+-
+-#ifdef PNG_READ_SUPPORTED
+-
+-#if PNG_ARM_NEON_OPT > 0
+-#ifdef PNG_ARM_NEON_CHECK_SUPPORTED /* Do run-time checks */
+-/* WARNING: it is strongly recommended that you do not build libpng with
+- * run-time checks for CPU features if at all possible.  In the case of the ARM
+- * NEON instructions there is no processor-specific way of detecting the
+- * presence of the required support, therefore run-time detection is extremely
+- * OS specific.
+- *
+- * You may set the macro PNG_ARM_NEON_FILE to the file name of file containing
+- * a fragment of C source code which defines the png_have_neon function.  There
+- * are a number of implementations in contrib/arm-neon, but the only one that
+- * has partial support is contrib/arm-neon/linux.c - a generic Linux
+- * implementation which reads /proc/cpufino.
+- */
+-#include <signal.h> /* for sig_atomic_t */
+-
+-#ifndef PNG_ARM_NEON_FILE
+-#  if defined(__aarch64__) || defined(_M_ARM64)
+-     /* ARM Neon is expected to be unconditionally available on ARM64. */
+-#    error "PNG_ARM_NEON_CHECK_SUPPORTED must not be defined on ARM64"
+-#  elif defined(__ARM_NEON__) || defined(__ARM_NEON)
+-     /* ARM Neon is expected to be available on the target CPU architecture. */
+-#    error "PNG_ARM_NEON_CHECK_SUPPORTED must not be defined on this CPU arch"
+-#  elif defined(__linux__)
+-#    define PNG_ARM_NEON_FILE "contrib/arm-neon/linux.c"
+-#  else
+-#    error "No support for run-time ARM Neon checking; use compile-time options"
+-#  endif
+-#endif
+-
+-static int png_have_neon(png_structp png_ptr);
+-#ifdef PNG_ARM_NEON_FILE
+-#  include PNG_ARM_NEON_FILE
++#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_ARM64)
++#  include <arm64_neon.h>
++#else
++#  include <arm_neon.h>
+ #endif
+-#endif /* PNG_ARM_NEON_CHECK_SUPPORTED */
+ 
+-#ifndef PNG_ALIGNED_MEMORY_SUPPORTED
+-#  error "ALIGNED_MEMORY is required; set: -DPNG_ALIGNED_MEMORY_SUPPORTED"
+-#endif
++/* Obtain the definitions of the actual filter functions: */
++#include "filter_neon_intrinsics.c"
+ 
+-void
++static void
+ png_init_filter_functions_neon(png_structp pp, unsigned int bpp)
+ {
+-   /* The switch statement is compiled in for ARM_NEON_API, the call to
+-    * png_have_neon is compiled in for ARM_NEON_CHECK.  If both are defined
+-    * the check is only performed if the API has not set the NEON option on
+-    * or off explicitly.  In this case the check controls what happens.
+-    *
+-    * If the CHECK is not compiled in and the option is UNSET the behavior prior
+-    * to 1.6.7 was to use the NEON code - this was a bug caused by having the
+-    * wrong order of the 'ON' and 'default' cases.  UNSET now defaults to OFF,
+-    * as documented in png.h
+-    */
+    png_debug(1, "in png_init_filter_functions_neon");
+-#ifdef PNG_ARM_NEON_API_SUPPORTED
+-   switch ((pp->options >> PNG_ARM_NEON) & 3)
+-   {
+-      case PNG_OPTION_UNSET:
+-         /* Allow the run-time check to execute if it has been enabled -
+-          * thus both API and CHECK can be turned on.  If it isn't supported
+-          * this case will fall through to the 'default' below, which just
+-          * returns.
+-          */
+-#endif /* PNG_ARM_NEON_API_SUPPORTED */
+-#ifdef PNG_ARM_NEON_CHECK_SUPPORTED
+-         {
+-            static volatile sig_atomic_t no_neon = -1; /* not checked */
+-
+-            if (no_neon < 0)
+-               no_neon = !png_have_neon(pp);
+ 
+-            if (no_neon)
+-               return;
+-         }
+-#ifdef PNG_ARM_NEON_API_SUPPORTED
+-         break;
+-#endif
+-#endif /* PNG_ARM_NEON_CHECK_SUPPORTED */
+-
+-#ifdef PNG_ARM_NEON_API_SUPPORTED
+-      default: /* OFF or INVALID */
+-         return;
+-
+-      case PNG_OPTION_ON:
+-         /* Option turned on */
+-         break;
+-   }
+-#endif
+-
+-   /* IMPORTANT: any new external functions used here must be declared using
+-    * PNG_INTERNAL_FUNCTION in ../pngpriv.h.  This is required so that the
+-    * 'prefix' option to configure works:
+-    *
+-    *    ./configure --with-libpng-prefix=foobar_
++   /* IMPORTANT: DO NOT DEFINE EXTERNAL FUNCTIONS HERE
+     *
+-    * Verify you have got this right by running the above command, doing a build
+-    * and examining pngprefix.h; it must contain a #define for every external
+-    * function you add.  (Notice that this happens automatically for the
+-    * initialization function.)
++    * This is because external functions must be declared with
++    * PNG_INTERNAL_FUNCTION in pngpriv.h; without this the PNG_PREFIX option to
++    * the build will not work (it will not know about these symbols).
+     */
+    pp->read_filter[PNG_FILTER_VALUE_UP-1] = png_read_filter_row_up_neon;
+ 
+@@ -135,5 +49,185 @@ png_init_filter_functions_neon(png_structp pp, unsigned int bpp)
+           png_read_filter_row_paeth4_neon;
+    }
+ }
+-#endif /* PNG_ARM_NEON_OPT > 0 */
+-#endif /* READ */
++
++#define png_target_init_filter_functions_impl png_init_filter_functions_neon
++
++#ifdef PNG_TARGET_STORES_DATA
++/*    png_target_free_data_impl
++ *       Must be defined if the implementation stores data in
++ *       png_struct::target_data.  Need not be defined otherwise.
++ */
++static void
++png_target_free_data_arm(png_structrp pp)
++{
++   png_voidp ptr = pp->target_data;
++   pp->target_data = NULL;
++   png_free(pp, ptr);
++}
++#define png_target_free_data_impl png_target_free_data_arm
++#endif /* TARGET_STORES_DATA */
++
++#ifdef PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE
++/*    png_target_do_expand_palette_impl   [flag: png_target_expand_palette]
++ *       static function
++ *       OPTIONAL
++ *       Handles the transform.  Need not be defined, only called if the
++ *       state contains png_target_<transform>, may set this flag to zero, may
++ *       return false to indicate that the transform was not done (so the
++ *       C implementation must then execute).
++ */
++#include "palette_neon_intrinsics.c"
++
++static int
++png_target_do_expand_palette_neon(png_structrp png_ptr, png_row_infop row_info,
++      png_bytep row, png_const_colorp palette, png_const_bytep trans_alpha,
++      int num_trans)
++{
++   /* NOTE: it is important that this is done. row_info->width is not a CSE
++    * because the pointer is not declared with the 'restrict' parameter, this
++    * makes it a CSE but then it is very important that no one changes it in
++    * this function, hence the const.
++    */
++   const png_uint_32 row_width = row_info->width;
++
++   /* NOTE: this is pretty much the original code:
++    *
++    * 1) The original code only works when the original PNG has 8-bits per
++    *    palette.  This test was in pngrtran.c and is now here.
++    *
++    * 2) The original code starts at the end and works backward but then stops
++    *    when it is within 16 bytes of the start.  It then left the remainder to
++    *    the original code in pngrtran.c  That code is now here.
++    *
++    * 3) The original code takes pointers to the end of the input and the end of
++    *    the output; this is the way png_do_expand_palette works becuase it
++    *    has to copy down from the end (otherwise it would overwrite the input
++    *    data before it read it).  Note that the row buffer is aliased by
++    *    these two pointers.
++    *
++    *    A consequence of passing pointers is that the row pointers (input and
++    *    output) are forced into memory (they can't be in registers).  This
++    *    could be fixed and some compilers may be able to handle this but
++    *    no changes have been made to the original ARM code at this point.
++    */
++   if (row_info->color_type == PNG_COLOR_TYPE_PALETTE &&
++       row_info->bit_depth == 8 /* <8 requires a bigger "riffled" palette */)
++   {
++      png_const_bytep sp = row + (row_width - 1); /* 8 bit palette index */
++      if (num_trans > 0)
++      {
++         /* This case needs a "riffled" palette.  In this implementation the
++          * initialization is done here, on demand.
++          */
++         if (png_ptr->target_data == NULL)
++         {
++            /* Initialize the accelerated palette expansion.
++             *
++             * The data is now allocated using png_malloc_warn so the code
++             * does not error out on OOM.
++             */
++            png_ptr->target_data = png_malloc_warn(png_ptr, 256 * 4);
++
++            /* On allocation error it is essential to clear the flag or a
++             * massive number of warnings will be output.
++             */
++            if (png_ptr->target_data != NULL)
++               png_riffle_palette_neon(png_ptr->target_data, palette,
++                     trans_alpha, num_trans);
++            else
++               goto clear_flag;
++         }
++
++         /* This is the general convention in the core transform code; when
++          * expanding the number of bytes in the row copy down (necessary) and
++          * pass a pointer to the last byte, not the first.
++          *
++          * It does not have to be preserved here but maybe it is better this
++          * way despite the fact that the comments in the neon palette code
++          * obfuscate what is happening.
++          */
++         png_bytep dp = row + (4/*RGBA*/*row_width - 1);
++
++         /* Cosmin Truta: "Sometimes row_info->bit_depth has been changed to 8.
++          * In these cases, the palette hasn't been riffled."
++          *
++          * John Bowler: Explanation: The code in png_do_palette_expand
++          * *invariably* changes the bit depth to 8.  So low palette bit depth
++          * gets expanded to 8 and png_row_info is adjusted to reflect this (see
++          * png_do_palette_expand), however the "riffle" initialization code
++          * checked the original png_ptr bit depth, so it didn't know this would
++          * happen...
++          *
++          * This could be changed; the original bit depth is irrelevant to the
++          * initialization code.
++          */
++          png_uint_32 i = png_target_do_expand_palette_rgba8_neon(
++                png_ptr->target_data, row_info->width, &sp, &dp);
++
++          if (i == 0) /* nothing was done */
++             return 0; /* Return here: interlaced images start out narrow */
++
++         /* Now 'i' make not have reached row_width.
++          * NOTE: [i] is not the index into the row buffer, rather than is
++          * [row_width-i], this is the way it is done in the original
++          * png_do_expand_palette.
++          */
++         for (; i < row_width; i++)
++         {
++            if ((int)(*sp) >= num_trans)
++               *dp-- = 0xff;
++            else
++               *dp-- = trans_alpha[*sp];
++            *dp-- = palette[*sp].blue;
++            *dp-- = palette[*sp].green;
++            *dp-- = palette[*sp].red;
++            sp--;
++         }
++
++         /* Finally update row_info to reflect the expanded output: */
++         row_info->bit_depth = 8;
++         row_info->pixel_depth = 32;
++         row_info->rowbytes = row_width * 4;
++         row_info->color_type = 6;
++         row_info->channels = 4;
++         return 1;
++      }
++      else
++      {
++         /* No tRNS chunk (num_trans == 0), expand to RGB not RGBA. */
++         png_bytep dp = row + (3/*RGB*/*row_width - 1);
++
++         png_uint_32 i = png_target_do_expand_palette_rgb8_neon(palette,
++               row_info->width, &sp, &dp);
++
++         if (i == 0)
++            return 0; /* Return here: interlaced images start out narrow */
++
++         /* Finish the last bytes: */
++         for (; i < row_width; i++)
++         {
++            *dp-- = palette[*sp].blue;
++            *dp-- = palette[*sp].green;
++            *dp-- = palette[*sp].red;
++            sp--;
++         }
++
++         row_info->bit_depth = 8;
++         row_info->pixel_depth = 24;
++         row_info->rowbytes = row_width * 3;
++         row_info->color_type = 2;
++         row_info->channels = 3;
++         return 1;
++      }
++   }
++
++clear_flag:
++   /* Here on malloc failure and on an inapplicable image. */
++   png_ptr->target_state &= ~png_target_expand_palette;
++   return 0;
++}
++
++#define png_target_do_expand_palette_impl png_target_do_expand_palette_neon
++/* EXPAND_PALETTE */
++
++#endif /*TODO*/
+diff --git a/arm/check.h b/arm/check.h
+new file mode 100644
+index 0000000000..8fb3521a82
+--- /dev/null
++++ b/arm/check.h
+@@ -0,0 +1,19 @@
++/* arm/check.h - NEON optimised filter functions
++ *
++ * Copyright (c) 2018-2022 Cosmin Truta
++ * Copyright (c) 2014,2016 Glenn Randers-Pehrson
++ * Written by Mans Rullgard, 2011.
++ *
++ * This code is released under the libpng license.
++ * For conditions of distribution and use, see the disclaimer
++ * and license in png.h
++ */
++#if defined(__ARM_NEON__) || defined(__ARM_NEON)
++#  define PNG_TARGET_CODE_IMPLEMENTATION "arm/arm_init.c"
++#  define PNG_TARGET_IMPLEMENTS_FILTERS
++#  ifdef PNG_READ_EXPAND_SUPPORTED
++#     define PNG_TARGET_STORES_DATA
++#     define PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE
++#  endif /* READ_EXPAND */
++#  define PNG_TARGET_ROW_ALIGNMENT 16
++#endif /* ARM_NEON */
+diff --git a/arm/filter_neon_intrinsics.c b/arm/filter_neon_intrinsics.c
+index 4466d48b20..53d9bdb466 100644
+--- a/arm/filter_neon_intrinsics.c
++++ b/arm/filter_neon_intrinsics.c
+@@ -1,4 +1,3 @@
+-
+ /* filter_neon_intrinsics.c - NEON optimised filter functions
+  *
+  * Copyright (c) 2018 Cosmin Truta
+@@ -11,18 +10,7 @@
+  * and license in png.h
+  */
+ 
+-#include "../pngpriv.h"
+-
+-#ifdef PNG_READ_SUPPORTED
+-
+-/* This code requires -mfpu=neon on the command line: */
+-#if PNG_ARM_NEON_IMPLEMENTATION == 1 /* intrinsics code from pngpriv.h */
+-
+-#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_ARM64)
+-#  include <arm64_neon.h>
+-#else
+-#  include <arm_neon.h>
+-#endif
++/* [[libpng-1.8]] this is file is included by arm/arm_init.c */
+ 
+ /* libpng row pointers are not necessarily aligned to any particular boundary,
+  * however this code will only work with appropriate alignment.  arm/arm_init.c
+@@ -45,9 +33,7 @@
+ #define png_ldr(type,pointer)\
+    (temp_pointer = png_ptr(type,pointer), *temp_pointer)
+ 
+-#if PNG_ARM_NEON_OPT > 0
+-
+-void
++static void
+ png_read_filter_row_up_neon(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev_row)
+ {
+@@ -68,7 +54,7 @@ png_read_filter_row_up_neon(png_row_infop row_info, png_bytep row,
+    }
+ }
+ 
+-void
++static void
+ png_read_filter_row_sub3_neon(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev_row)
+ {
+@@ -115,7 +101,7 @@ png_read_filter_row_sub3_neon(png_row_infop row_info, png_bytep row,
+    PNG_UNUSED(prev_row)
+ }
+ 
+-void
++static void
+ png_read_filter_row_sub4_neon(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev_row)
+ {
+@@ -147,7 +133,7 @@ png_read_filter_row_sub4_neon(png_row_infop row_info, png_bytep row,
+    PNG_UNUSED(prev_row)
+ }
+ 
+-void
++static void
+ png_read_filter_row_avg3_neon(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev_row)
+ {
+@@ -215,7 +201,7 @@ png_read_filter_row_avg3_neon(png_row_infop row_info, png_bytep row,
+    }
+ }
+ 
+-void
++static void
+ png_read_filter_row_avg4_neon(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev_row)
+ {
+@@ -284,7 +270,7 @@ paeth(uint8x8_t a, uint8x8_t b, uint8x8_t c)
+    return e;
+ }
+ 
+-void
++static void
+ png_read_filter_row_paeth3_neon(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev_row)
+ {
+@@ -352,7 +338,7 @@ png_read_filter_row_paeth3_neon(png_row_infop row_info, png_bytep row,
+    }
+ }
+ 
+-void
++static void
+ png_read_filter_row_paeth4_neon(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev_row)
+ {
+@@ -396,7 +382,3 @@ png_read_filter_row_paeth4_neon(png_row_infop row_info, png_bytep row,
+       vst4_lane_u32(png_ptr(uint32_t,rp), vdest_val, 0);
+    }
+ }
+-
+-#endif /* PNG_ARM_NEON_OPT > 0 */
+-#endif /* PNG_ARM_NEON_IMPLEMENTATION == 1 (intrinsics) */
+-#endif /* READ */
+diff --git a/arm/palette_neon_intrinsics.c b/arm/palette_neon_intrinsics.c
+index 484eb41b74..0c29fad0ea 100644
+--- a/arm/palette_neon_intrinsics.c
++++ b/arm/palette_neon_intrinsics.c
+@@ -1,4 +1,3 @@
+-
+ /* palette_neon_intrinsics.c - NEON optimised palette expansion functions
+  *
+  * Copyright (c) 2018-2019 Cosmin Truta
+@@ -10,24 +9,11 @@
+  * and license in png.h
+  */
+ 
+-#include "../pngpriv.h"
+-
+-#if PNG_ARM_NEON_IMPLEMENTATION == 1
+-
+-#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_ARM64)
+-#  include <arm64_neon.h>
+-#else
+-#  include <arm_neon.h>
+-#endif
+-
+ /* Build an RGBA8 palette from the separate RGB and alpha palettes. */
+-void
+-png_riffle_palette_neon(png_structrp png_ptr)
++static void
++png_riffle_palette_neon(png_bytep riffled_palette, png_const_colorp palette,
++      png_const_bytep trans_alpha, int num_trans)
+ {
+-   png_const_colorp palette = png_ptr->palette;
+-   png_bytep riffled_palette = png_ptr->riffled_palette;
+-   png_const_bytep trans_alpha = png_ptr->trans_alpha;
+-   int num_trans = png_ptr->num_trans;
+    int i;
+ 
+    /* Initially black, opaque. */
+@@ -58,19 +44,15 @@ png_riffle_palette_neon(png_structrp png_ptr)
+ }
+ 
+ /* Expands a palettized row into RGBA8. */
+-int
+-png_do_expand_palette_rgba8_neon(png_structrp png_ptr, png_row_infop row_info,
+-    png_const_bytep row, png_bytepp ssp, png_bytepp ddp)
++static png_uint_32
++png_target_do_expand_palette_rgba8_neon(const png_uint_32 *riffled_palette,
++      png_uint_32 row_width, png_const_bytep *ssp, png_bytep *ddp)
+ {
+-   png_uint_32 row_width = row_info->width;
+-   const png_uint_32 *riffled_palette =
+-      png_aligncastconst(png_const_uint_32p, png_ptr->riffled_palette);
+    const png_uint_32 pixels_per_chunk = 4;
+    png_uint_32 i;
+ 
+    png_debug(1, "in png_do_expand_palette_rgba8_neon");
+ 
+-   PNG_UNUSED(row)
+    if (row_width < pixels_per_chunk)
+       return 0;
+ 
+@@ -83,7 +65,8 @@ png_do_expand_palette_rgba8_neon(png_structrp png_ptr, png_row_infop row_info,
+    for (i = 0; i < row_width; i += pixels_per_chunk)
+    {
+       uint32x4_t cur;
+-      png_bytep sp = *ssp - i, dp = *ddp - (i << 2);
++      png_const_bytep sp = *ssp - i;
++      png_bytep dp = *ddp - (i << 2);
+       cur = vld1q_dup_u32 (riffled_palette + *(sp - 3));
+       cur = vld1q_lane_u32(riffled_palette + *(sp - 2), cur, 1);
+       cur = vld1q_lane_u32(riffled_palette + *(sp - 1), cur, 2);
+@@ -103,18 +86,18 @@ png_do_expand_palette_rgba8_neon(png_structrp png_ptr, png_row_infop row_info,
+ }
+ 
+ /* Expands a palettized row into RGB8. */
+-int
+-png_do_expand_palette_rgb8_neon(png_structrp png_ptr, png_row_infop row_info,
+-    png_const_bytep row, png_bytepp ssp, png_bytepp ddp)
++static png_uint_32
++png_target_do_expand_palette_rgb8_neon(png_const_colorp paletteIn,
++      png_uint_32 row_width, png_const_bytep *ssp, png_bytep *ddp)
+ {
+-   png_uint_32 row_width = row_info->width;
+-   png_const_bytep palette = (png_const_bytep)png_ptr->palette;
++   /* TODO: This case is VERY dangerous: */
++   png_const_bytep palette = (png_const_bytep)paletteIn;
++
+    const png_uint_32 pixels_per_chunk = 8;
+    png_uint_32 i;
+ 
+    png_debug(1, "in png_do_expand_palette_rgb8_neon");
+ 
+-   PNG_UNUSED(row)
+    if (row_width <= pixels_per_chunk)
+       return 0;
+ 
+@@ -124,7 +107,8 @@ png_do_expand_palette_rgb8_neon(png_structrp png_ptr, png_row_infop row_info,
+    for (i = 0; i < row_width; i += pixels_per_chunk)
+    {
+       uint8x8x3_t cur;
+-      png_bytep sp = *ssp - i, dp = *ddp - ((i << 1) + i);
++      png_const_bytep sp = *ssp - i;
++      png_bytep dp = *ddp - ((i << 1) + i);
+       cur = vld3_dup_u8(palette + sizeof(png_color) * (*(sp - 7)));
+       cur = vld3_lane_u8(palette + sizeof(png_color) * (*(sp - 6)), cur, 1);
+       cur = vld3_lane_u8(palette + sizeof(png_color) * (*(sp - 5)), cur, 2);
+@@ -147,5 +131,3 @@ png_do_expand_palette_rgb8_neon(png_structrp png_ptr, png_row_infop row_info,
+    *ddp = *ddp - ((i << 1) + i);
+    return i;
+ }
+-
+-#endif /* PNG_ARM_NEON_IMPLEMENTATION */
+diff --git a/configure.ac b/configure.ac
+index da43b9bc43..2bbc945595 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -321,13 +321,8 @@ AC_ARG_ENABLE([hardware-optimizations],
+    [case "$enableval" in
+       no|off)
+          # disable hardware optimization on all systems
+-         AC_DEFINE([PNG_ARM_NEON_OPT], [0], [Disable ARM NEON specific code])
+-         AC_DEFINE([PNG_INTEL_SSE_OPT], [0], [Disable INTEL SSE specific code])
+-         AC_DEFINE([PNG_LOONGARCH_LSX_OPT], [0],
+-                   [Disable LOONGARCH specific code])
+-         AC_DEFINE([PNG_MIPS_MMI_OPT], [0], [Disable MIPS MSA specific code])
+-         AC_DEFINE([PNG_MIPS_MSA_OPT], [0], [Disable MIPS MSI specific code])
+-         AC_DEFINE([PNG_POWERPC_OPT], [0], [Disable POWERPC VSX specific code])
++         AC_DEFINE([PNG_NO_HARDWARE], [1],
++                   [Disable hardware specific optimizations])
+          ;;
+       *)
+          ;;
+diff --git a/intel/check.h b/intel/check.h
+new file mode 100644
+index 0000000000..47ce7091f9
+--- /dev/null
++++ b/intel/check.h
+@@ -0,0 +1,35 @@
++/* intel/check.h - SSE2 optimized filter functions
++ *
++ * Copyright (c) 2018 Cosmin Truta
++ * Copyright (c) 2016-2017 Glenn Randers-Pehrson
++ * Written by Mike Klein and Matt Sarett, Google, Inc.
++ * Derived from arm/arm_init.c
++ *
++ * This code is released under the libpng license.
++ * For conditions of distribution and use, see the disclaimer
++ * and license in png.h
++ */
++/* PNG_INTEL_SSE_IMPLEMENTATION is used in the actual implementation to selecct
++ * the correct code.
++ */
++#if defined(__SSE4_1__) || defined(__AVX__)
++   /* We are not actually using AVX, but checking for AVX is the best way we can
++    * detect SSE4.1 and SSSE3 on MSVC.
++    */
++#  define PNG_INTEL_SSE_IMPLEMENTATION 3
++#elif defined(__SSSE3__)
++#  define PNG_INTEL_SSE_IMPLEMENTATION 2
++#elif defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) ||\
++      (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
++#  define PNG_INTEL_SSE_IMPLEMENTATION 1
++#else
++#  define PNG_INTEL_SSE_IMPLEMENTATION 0
++#endif
++
++#if PNG_INTEL_SSE_IMPLEMENTATION > 0
++#  define PNG_TARGET_CODE_IMPLEMENTATION "intel/intel_init.c"
++   /*PNG_TARGET_STORES_DATA*/
++#  define PNG_TARGET_IMPLEMENTS_FILTERS
++   /*PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE*/
++#  define PNG_TARGET_ROW_ALIGNMENT 16
++#endif /* PNG_INTEL_SSE_IMPLEMENTATION > 0 */
+diff --git a/intel/filter_sse2_intrinsics.c b/intel/filter_sse2_intrinsics.c
+index d3c0fe9e2d..11ec96cac6 100644
+--- a/intel/filter_sse2_intrinsics.c
++++ b/intel/filter_sse2_intrinsics.c
+@@ -1,4 +1,3 @@
+-
+ /* filter_sse2_intrinsics.c - SSE2 optimized filter functions
+  *
+  * Copyright (c) 2018 Cosmin Truta
+@@ -10,13 +9,6 @@
+  * For conditions of distribution and use, see the disclaimer
+  * and license in png.h
+  */
+-
+-#include "../pngpriv.h"
+-
+-#ifdef PNG_READ_SUPPORTED
+-
+-#if PNG_INTEL_SSE_IMPLEMENTATION > 0
+-
+ #include <immintrin.h>
+ 
+ /* Functions in this file look at most 3 pixels (a,b,c) to predict the 4th (d).
+@@ -49,7 +41,8 @@ static void store3(void* p, __m128i v) {
+    memcpy(p, &tmp, 3);
+ }
+ 
+-void png_read_filter_row_sub3_sse2(png_row_infop row_info, png_bytep row,
++static void
++png_read_filter_row_sub3_sse2(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev)
+ {
+    /* The Sub filter predicts each pixel as the previous pixel, a.
+@@ -82,7 +75,8 @@ void png_read_filter_row_sub3_sse2(png_row_infop row_info, png_bytep row,
+    PNG_UNUSED(prev)
+ }
+ 
+-void png_read_filter_row_sub4_sse2(png_row_infop row_info, png_bytep row,
++static void
++png_read_filter_row_sub4_sse2(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev)
+ {
+    /* The Sub filter predicts each pixel as the previous pixel, a.
+@@ -107,7 +101,8 @@ void png_read_filter_row_sub4_sse2(png_row_infop row_info, png_bytep row,
+    PNG_UNUSED(prev)
+ }
+ 
+-void png_read_filter_row_avg3_sse2(png_row_infop row_info, png_bytep row,
++static void
++png_read_filter_row_avg3_sse2(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev)
+ {
+    /* The Avg filter predicts each pixel as the (truncated) average of a and b.
+@@ -162,7 +157,8 @@ void png_read_filter_row_avg3_sse2(png_row_infop row_info, png_bytep row,
+    }
+ }
+ 
+-void png_read_filter_row_avg4_sse2(png_row_infop row_info, png_bytep row,
++static void
++png_read_filter_row_avg4_sse2(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev)
+ {
+    /* The Avg filter predicts each pixel as the (truncated) average of a and b.
+@@ -226,7 +222,8 @@ static __m128i if_then_else(__m128i c, __m128i t, __m128i e) {
+ #endif
+ }
+ 
+-void png_read_filter_row_paeth3_sse2(png_row_infop row_info, png_bytep row,
++static void
++png_read_filter_row_paeth3_sse2(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev)
+ {
+    /* Paeth tries to predict pixel d using the pixel to the left of it, a,
+@@ -325,7 +322,8 @@ void png_read_filter_row_paeth3_sse2(png_row_infop row_info, png_bytep row,
+    }
+ }
+ 
+-void png_read_filter_row_paeth4_sse2(png_row_infop row_info, png_bytep row,
++static void
++png_read_filter_row_paeth4_sse2(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev)
+ {
+    /* Paeth tries to predict pixel d using the pixel to the left of it, a,
+@@ -386,6 +384,3 @@ void png_read_filter_row_paeth4_sse2(png_row_infop row_info, png_bytep row,
+       rb   -= 4;
+    }
+ }
+-
+-#endif /* PNG_INTEL_SSE_IMPLEMENTATION > 0 */
+-#endif /* READ */
+diff --git a/intel/intel_init.c b/intel/intel_init.c
+index 2f8168b7c4..667dd306a1 100644
+--- a/intel/intel_init.c
++++ b/intel/intel_init.c
+@@ -1,4 +1,3 @@
+-
+ /* intel_init.c - SSE2 optimized filter functions
+  *
+  * Copyright (c) 2018 Cosmin Truta
+@@ -10,13 +9,11 @@
+  * For conditions of distribution and use, see the disclaimer
+  * and license in png.h
+  */
++#define png_target_impl "intel-sse"
+ 
+-#include "../pngpriv.h"
+-
+-#ifdef PNG_READ_SUPPORTED
+-#if PNG_INTEL_SSE_IMPLEMENTATION > 0
++#include "filter_sse2_intrinsics.c"
+ 
+-void
++static void
+ png_init_filter_functions_sse2(png_structp pp, unsigned int bpp)
+ {
+    /* The techniques used to implement each of these filters in SSE operate on
+@@ -48,5 +45,4 @@ png_init_filter_functions_sse2(png_structp pp, unsigned int bpp)
+     */
+ }
+ 
+-#endif /* PNG_INTEL_SSE_IMPLEMENTATION > 0 */
+-#endif /* PNG_READ_SUPPORTED */
++#define png_target_init_filter_functions_impl png_init_filter_functions_sse2
+diff --git a/mips/check.h b/mips/check.h
+new file mode 100644
+index 0000000000..8ed2a6d233
+--- /dev/null
++++ b/mips/check.h
+@@ -0,0 +1,25 @@
++/* mips/check.h - MIPS optimised filter functions
++ *
++ * Copyright (c) 2024 John Bowler
++ *
++ * This code is released under the libpng license.
++ * For conditions of distribution and use, see the disclaimer
++ * and license in png.h
++ */
++
++/* Unlike other architectures the tests here are written so that they can be
++ * extended by the addition of other different ISA extensions.  This could
++ * easily be done with all the other architectures too.
++ *
++ * TODO: move the ISA specific checks to sub-directories so that the code
++ * does not taint other implementations.
++ */
++#include "msacheck.h" /* Check for MSA extensions */
++/*... add other checks here (each in its own header file). */
++
++#ifdef PNG_TARGET_MIPS_TARGET_CODE_SUPPORTED
++   /* Regardless of the optimization the following must always be the same: */
++#  define PNG_TARGET_CODE_IMPLEMENTATION "mips/mips_init.c"
++#  define PNG_TARGET_IMPLEMENTS_FILTERS
++#  define PNG_TARGET_ROW_ALIGNMENT 16
++#endif
+diff --git a/mips/filter_msa_intrinsics.c b/mips/filter_msa_intrinsics.c
+index 614898e211..50821492e5 100644
+--- a/mips/filter_msa_intrinsics.c
++++ b/mips/filter_msa_intrinsics.c
+@@ -1,4 +1,3 @@
+-
+ /* filter_msa_intrinsics.c - MSA optimised filter functions
+  *
+  * Copyright (c) 2018-2024 Cosmin Truta
+@@ -9,15 +8,6 @@
+  * For conditions of distribution and use, see the disclaimer
+  * and license in png.h
+  */
+-
+-#include <stdio.h>
+-#include "../pngpriv.h"
+-
+-#ifdef PNG_READ_SUPPORTED
+-
+-/* This code requires -mfpu=msa on the command line: */
+-#if PNG_MIPS_MSA_IMPLEMENTATION == 1 /* intrinsics code from pngpriv.h */
+-
+ #include <msa.h>
+ #include <stdint.h>
+ 
+@@ -37,8 +27,6 @@
+ #define png_ldr(type,pointer)\
+    (temp_pointer = png_ptr(type,pointer), *temp_pointer)
+ 
+-#if PNG_MIPS_MSA_OPT > 0
+-
+ #ifdef CLANG_BUILD
+    #define MSA_SRLI_B(a, b)   __msa_srli_b((v16i8) a, b)
+ 
+@@ -364,8 +352,9 @@
+    out0 += inp4;                                                              \
+ }
+ 
+-void png_read_filter_row_up_msa(png_row_infop row_info, png_bytep row,
+-                                png_const_bytep prev_row)
++static void
++png_read_filter_row_up_msa(png_row_infop row_info, png_bytep row,
++   png_const_bytep prev_row)
+ {
+    size_t i, cnt, cnt16, cnt32;
+    size_t istop = row_info->rowbytes;
+@@ -455,8 +444,9 @@ void png_read_filter_row_up_msa(png_row_infop row_info, png_bytep row,
+    }
+ }
+ 
+-void png_read_filter_row_sub4_msa(png_row_infop row_info, png_bytep row,
+-                                  png_const_bytep prev_row)
++static void
++png_read_filter_row_sub4_msa(png_row_infop row_info, png_bytep row,
++   png_const_bytep prev_row)
+ {
+    size_t count;
+    size_t istop = row_info->rowbytes;
+@@ -494,8 +484,9 @@ void png_read_filter_row_sub4_msa(png_row_infop row_info, png_bytep row,
+    }
+ }
+ 
+-void png_read_filter_row_sub3_msa(png_row_infop row_info, png_bytep row,
+-                                  png_const_bytep prev_row)
++static void
++png_read_filter_row_sub3_msa(png_row_infop row_info, png_bytep row,
++   png_const_bytep prev_row)
+ {
+    size_t count;
+    size_t istop = row_info->rowbytes;
+@@ -539,8 +530,9 @@ void png_read_filter_row_sub3_msa(png_row_infop row_info, png_bytep row,
+    }
+ }
+ 
+-void png_read_filter_row_avg4_msa(png_row_infop row_info, png_bytep row,
+-                                  png_const_bytep prev_row)
++static void
++png_read_filter_row_avg4_msa(png_row_infop row_info, png_bytep row,
++   png_const_bytep prev_row)
+ {
+    size_t i;
+    png_bytep src = row;
+@@ -590,8 +582,9 @@ void png_read_filter_row_avg4_msa(png_row_infop row_info, png_bytep row,
+    }
+ }
+ 
+-void png_read_filter_row_avg3_msa(png_row_infop row_info, png_bytep row,
+-                                  png_const_bytep prev_row)
++static void
++png_read_filter_row_avg3_msa(png_row_infop row_info, png_bytep row,
++   png_const_bytep prev_row)
+ {
+    size_t i;
+    png_bytep src = row;
+@@ -651,9 +644,9 @@ void png_read_filter_row_avg3_msa(png_row_infop row_info, png_bytep row,
+    }
+ }
+ 
+-void png_read_filter_row_paeth4_msa(png_row_infop row_info,
+-                                    png_bytep row,
+-                                    png_const_bytep prev_row)
++static void
++png_read_filter_row_paeth4_msa(png_row_infop row_info, png_bytep row,
++   png_const_bytep prev_row)
+ {
+    int32_t count, rp_end;
+    png_bytep nxt;
+@@ -722,9 +715,9 @@ void png_read_filter_row_paeth4_msa(png_row_infop row_info,
+    }
+ }
+ 
+-void png_read_filter_row_paeth3_msa(png_row_infop row_info,
+-                                    png_bytep row,
+-                                    png_const_bytep prev_row)
++static void
++png_read_filter_row_paeth3_msa(png_row_infop row_info, png_bytep row,
++   png_const_bytep prev_row)
+ {
+    int32_t count, rp_end;
+    png_bytep nxt;
+@@ -802,7 +795,3 @@ void png_read_filter_row_paeth3_msa(png_row_infop row_info,
+       nxt += 4;
+    }
+ }
+-
+-#endif /* PNG_MIPS_MSA_OPT > 0 */
+-#endif /* PNG_MIPS_MSA_IMPLEMENTATION == 1 (intrinsics) */
+-#endif /* READ */
+diff --git a/mips/mips_init.c b/mips/mips_init.c
+index 5c6fa1dbf1..12b113ec02 100644
+--- a/mips/mips_init.c
++++ b/mips/mips_init.c
+@@ -1,187 +1,21 @@
+ 
+ /* mips_init.c - MSA optimised filter functions
+  *
+- * Copyright (c) 2018-2024 Cosmin Truta
++ * Copyright (c) 2018 Cosmin Truta
+  * Copyright (c) 2016 Glenn Randers-Pehrson
+  * Written by Mandar Sahastrabuddhe, 2016
+- * Updated by guxiwei, 2023
+  *
+  * This code is released under the libpng license.
+  * For conditions of distribution and use, see the disclaimer
+  * and license in png.h
+  */
++#define png_target_impl "mips-msa"
+ 
+-/* Below, after checking __linux__, various non-C90 POSIX 1003.1 functions are
+- * called.
+- */
+-#define _POSIX_SOURCE 1
+-
+-#include <stdio.h>
+-#include "../pngpriv.h"
+-
+-#ifdef PNG_READ_SUPPORTED
+-
+-#if PNG_MIPS_MSA_IMPLEMENTATION == 1 || PNG_MIPS_MMI_IMPLEMENTATION > 0
+-
+-#ifdef PNG_MIPS_MSA_CHECK_SUPPORTED /* Do MIPS MSA run-time checks */
+-/* WARNING: it is strongly recommended that you do not build libpng with
+- * run-time checks for CPU features if at all possible.  In the case of the MIPS
+- * MSA instructions there is no processor-specific way of detecting the
+- * presence of the required support, therefore run-time detection is extremely
+- * OS specific.
+- *
+- * You may set the macro PNG_MIPS_MSA_FILE to the file name of file containing
+- * a fragment of C source code which defines the png_have_msa function.  There
+- * are a number of implementations in contrib/mips-msa, but the only one that
+- * has partial support is contrib/mips-msa/linux.c - a generic Linux
+- * implementation which reads /proc/cpufino.
+- */
+-#ifndef PNG_MIPS_MSA_FILE
+-#  ifdef __linux__
+-#     define PNG_MIPS_MSA_FILE "contrib/mips-msa/linux.c"
+-#  endif
+-#endif
+-
+-#ifdef PNG_MIPS_MSA_FILE
+-
+-#include <signal.h> /* for sig_atomic_t */
+-static int png_have_msa(png_structp png_ptr);
+-#include PNG_MIPS_MSA_FILE
+-
+-#else  /* PNG_MIPS_MSA_FILE */
+-#  error "PNG_MIPS_MSA_FILE undefined: no support for run-time MIPS MSA checks"
+-#endif /* PNG_MIPS_MSA_FILE */
+-#endif /* PNG_MIPS_MSA_CHECK_SUPPORTED */
++#include "filter_msa_intrinsics.c"
+ 
+-#ifdef PNG_MIPS_MMI_CHECK_SUPPORTED /* Do MIPS MMI run-times checks */
+-#ifndef PNG_MIPS_MMI_FILE
+-#  ifdef __linux__
+-#     define PNG_MIPS_MMI_FILE "contrib/mips-mmi/linux.c"
+-#  endif
+-#endif
+-
+-#ifdef PNG_MIPS_MMI_FILE
+-
+-#include <signal.h> /* for sig_atomic_t */
+-static int png_have_mmi();
+-#include PNG_MIPS_MMI_FILE
+-
+-#else  /* PNG_MIPS_MMI_FILE */
+-#  error "PNG_MIPS_MMI_FILE undefined: no support for run-time MIPS MMI checks"
+-#endif /* PNG_MIPS_MMI_FILE */
+-#endif /* PNG_MIPS_MMI_CHECK_SUPPORTED*/
+-
+-#ifndef PNG_ALIGNED_MEMORY_SUPPORTED
+-#  error "ALIGNED_MEMORY is required; set: -DPNG_ALIGNED_MEMORY_SUPPORTED"
+-#endif
+-
+-/* MIPS supports two optimizations: MMI and MSA. The appropriate
+- * optimization is chosen at runtime
+- */
+-void
+-png_init_filter_functions_mips(png_structp pp, unsigned int bpp)
++static void
++png_init_filter_functions_msa(png_structp pp, unsigned int bpp)
+ {
+-#if PNG_MIPS_MMI_IMPLEMENTATION  > 0
+-#ifdef PNG_MIPS_MMI_API_SUPPORTED
+-   switch ((pp->options >> PNG_MIPS_MMI) & 3)
+-   {
+-      case PNG_OPTION_UNSET:
+-#endif /* PNG_MIPS_MMI_API_SUPPORTED */
+-#ifdef PNG_MIPS_MMI_CHECK_SUPPORTED
+-         {
+-            static volatile sig_atomic_t no_mmi = -1; /* not checked */
+-
+-            if (no_mmi < 0)
+-               no_mmi = !png_have_mmi();
+-
+-            if (no_mmi)
+-              goto MIPS_MSA_INIT;
+-         }
+-#ifdef PNG_MIPS_MMI_API_SUPPORTED
+-         break;
+-#endif
+-#endif /* PNG_MIPS_MMI_CHECK_SUPPORTED */
+-
+-#ifdef PNG_MIPS_MMI_API_SUPPORTED
+-      default: /* OFF or INVALID */
+-         goto MIPS_MSA_INIT;
+-
+-      case PNG_OPTION_ON:
+-         /* Option turned on */
+-         break;
+-   }
+-#endif
+-   pp->read_filter[PNG_FILTER_VALUE_UP-1] = png_read_filter_row_up_mmi;
+-   if (bpp == 3)
+-   {
+-      pp->read_filter[PNG_FILTER_VALUE_SUB-1] = png_read_filter_row_sub3_mmi;
+-      pp->read_filter[PNG_FILTER_VALUE_AVG-1] = png_read_filter_row_avg3_mmi;
+-      pp->read_filter[PNG_FILTER_VALUE_PAETH-1] =
+-         png_read_filter_row_paeth3_mmi;
+-   }
+-   else if (bpp == 4)
+-   {
+-      pp->read_filter[PNG_FILTER_VALUE_SUB-1] = png_read_filter_row_sub4_mmi;
+-      pp->read_filter[PNG_FILTER_VALUE_AVG-1] = png_read_filter_row_avg4_mmi;
+-      pp->read_filter[PNG_FILTER_VALUE_PAETH-1] =
+-          png_read_filter_row_paeth4_mmi;
+-   }
+-#endif /* PNG_MIPS_MMI_IMPLEMENTATION > 0 */
+-
+-MIPS_MSA_INIT:
+-#if PNG_MIPS_MSA_IMPLEMENTATION == 1
+-   /* The switch statement is compiled in for MIPS_MSA_API, the call to
+-    * png_have_msa is compiled in for MIPS_MSA_CHECK. If both are defined
+-    * the check is only performed if the API has not set the MSA option on
+-    * or off explicitly. In this case the check controls what happens.
+-    */
+-
+-#ifdef PNG_MIPS_MSA_API_SUPPORTED
+-   switch ((pp->options >> PNG_MIPS_MSA) & 3)
+-   {
+-      case PNG_OPTION_UNSET:
+-         /* Allow the run-time check to execute if it has been enabled -
+-          * thus both API and CHECK can be turned on.  If it isn't supported
+-          * this case will fall through to the 'default' below, which just
+-          * returns.
+-          */
+-#endif /* PNG_MIPS_MSA_API_SUPPORTED */
+-#ifdef PNG_MIPS_MSA_CHECK_SUPPORTED
+-         {
+-            static volatile sig_atomic_t no_msa = -1; /* not checked */
+-
+-            if (no_msa < 0)
+-               no_msa = !png_have_msa(pp);
+-
+-            if (no_msa)
+-               return;
+-         }
+-#ifdef PNG_MIPS_MSA_API_SUPPORTED
+-         break;
+-#endif
+-#endif /* PNG_MIPS_MSA_CHECK_SUPPORTED */
+-
+-#ifdef PNG_MIPS_MSA_API_SUPPORTED
+-      default: /* OFF or INVALID */
+-         return;
+-
+-      case PNG_OPTION_ON:
+-         /* Option turned on */
+-         break;
+-   }
+-#endif
+-
+-   /* IMPORTANT: any new external functions used here must be declared using
+-    * PNG_INTERNAL_FUNCTION in ../pngpriv.h.  This is required so that the
+-    * 'prefix' option to configure works:
+-    *
+-    *    ./configure --with-libpng-prefix=foobar_
+-    *
+-    * Verify you have got this right by running the above command, doing a build
+-    * and examining pngprefix.h; it must contain a #define for every external
+-    * function you add.  (Notice that this happens automatically for the
+-    * initialization function.)
+-    */
+    pp->read_filter[PNG_FILTER_VALUE_UP-1] = png_read_filter_row_up_msa;
+ 
+    if (bpp == 3)
+@@ -197,8 +31,6 @@ png_init_filter_functions_mips(png_structp pp, unsigned int bpp)
+       pp->read_filter[PNG_FILTER_VALUE_AVG-1] = png_read_filter_row_avg4_msa;
+       pp->read_filter[PNG_FILTER_VALUE_PAETH-1] = png_read_filter_row_paeth4_msa;
+    }
+-#endif /* PNG_MIPS_MSA_IMPLEMENTATION == 1 */
+-   return;
+ }
+-#endif /* PNG_MIPS_MSA_IMPLEMENTATION == 1 || PNG_MIPS_MMI_IMPLEMENTATION > 0 */
+-#endif /* READ */
++
++#  define png_target_init_filter_functions_impl png_init_filter_functions_msa
+diff --git a/mips/msacheck.h b/mips/msacheck.h
+new file mode 100644
+index 0000000000..a31e131b20
+--- /dev/null
++++ b/mips/msacheck.h
+@@ -0,0 +1,26 @@
++/* mips/msacheck.h - MIPS optimised filter functions
++ *
++ * Copyright (c) 2018-2022 Cosmin Truta
++ * Copyright (c) 2014,2016 Glenn Randers-Pehrson
++ *
++ * This code is released under the libpng license.
++ * For conditions of distribution and use, see the disclaimer
++ * and license in png.h
++ *
++ * This code has been moved from the original in pngpriv.h.
++ */
++/* MIPS MSA checks: */
++#if defined(__mips_msa) && (__mips_isa_rev >= 5)
++   /* MIPS MSA support requires gcc >= 4.7: */
++#  ifdef __GNUC__
++#     if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 7)
++#        define PNG_TARGET_MIPS_MSA_SUPPORTED
++#     endif
++#  else /* !GNUC */
++#     define PNG_TARGET_MIPS_MSA_SUPPORTED
++#  endif /* !GNUC */
++#endif /* !__mips_msa || __mips_isa_rev < 5 */
++
++#ifdef PNG_TARGET_MIPS_MSA_SUPPORTED
++#  define PNG_TARGET_MIPS_TARGET_CODE_SUPPORTED
++#endif
+diff --git a/png.c b/png.c
+index 25128dba64..a03e0ad889 100644
+--- a/png.c
++++ b/png.c
+@@ -2369,12 +2369,10 @@ png_compare_ICC_profile_with_sRGB(png_const_structrp png_ptr,
+ #endif
+    unsigned int i;
+ 
+-#ifdef PNG_SET_OPTION_SUPPORTED
+    /* First see if PNG_SKIP_sRGB_CHECK_PROFILE has been set to "on" */
+    if (((png_ptr->options >> PNG_SKIP_sRGB_CHECK_PROFILE) & 3) ==
+                PNG_OPTION_ON)
+       return 0;
+-#endif
+ 
+    for (i=0; i < (sizeof png_sRGB_checks) / (sizeof png_sRGB_checks[0]); ++i)
+    {
+@@ -4347,7 +4345,6 @@ png_build_gamma_table(png_structrp png_ptr, int bit_depth)
+ #endif /* READ_GAMMA */
+ 
+ /* HARDWARE OR SOFTWARE OPTION SUPPORT */
+-#ifdef PNG_SET_OPTION_SUPPORTED
+ int PNGAPI
+ png_set_option(png_structrp png_ptr, int option, int onoff)
+ {
+@@ -4365,7 +4362,6 @@ png_set_option(png_structrp png_ptr, int option, int onoff)
+ 
+    return PNG_OPTION_INVALID;
+ }
+-#endif
+ 
+ /* sRGB support */
+ #if defined(PNG_SIMPLIFIED_READ_SUPPORTED) ||\
+diff --git a/png.h b/png.h
+index 703097282b..7a12e05764 100644
+--- a/png.h
++++ b/png.h
+@@ -3180,49 +3180,50 @@ PNG_EXPORT(245, int, png_image_write_to_memory, (png_imagep image, void *memory,
+  * option and 'onoff' is 0 (off) or non-0 (on).  The value returned is given
+  * by the PNG_OPTION_ defines below.
+  *
+- * HARDWARE: normally hardware capabilities, such as the Intel SSE instructions,
+- *           are detected at run time, however sometimes it may be impossible
+- *           to do this in user mode, in which case it is necessary to discover
+- *           the capabilities in an OS specific way.  Such capabilities are
+- *           listed here when libpng has support for them and must be turned
+- *           ON by the application if present.
++ * HARDWARE: [[changed in libpng 1.8]]
++ *           Hardware options are now controlled globally to be 'on' or 'off'.
++ *           For backward compatibility the original options are defined as
++ *           the 'new' hardware option.  libpng can be compiled without
++ *           hardware support (check PNG_TARGET_SPECIFIC_CODE_SUPPORTED and
++ *           the documenation in pngtarget.h).
+  *
+  * SOFTWARE: sometimes software optimizations actually result in performance
+  *           decrease on some architectures or systems, or with some sets of
+  *           PNG images.  'Software' options allow such optimizations to be
+  *           selected at run time.
++ *
++ * The initial setting for HARDWARE is determined by whether or not any
++ * hardware-specific optimizations are available; the setting will be "ON" if
++ * so otherwise it will be UNSET.
++ *
++ * the option starts of UNSET and this is treated as OFF.
+  */
+-#ifdef PNG_SET_OPTION_SUPPORTED
+-#ifdef PNG_ARM_NEON_API_SUPPORTED
+-#  define PNG_ARM_NEON   0 /* HARDWARE: ARM Neon SIMD instructions supported */
+-#endif
+-#define PNG_MAXIMUM_INFLATE_WINDOW 2 /* SOFTWARE: force maximum window */
+-#define PNG_SKIP_sRGB_CHECK_PROFILE 4 /* SOFTWARE: Check ICC profile for sRGB */
+-#ifdef PNG_MIPS_MSA_API_SUPPORTED
+-#  define PNG_MIPS_MSA   6 /* HARDWARE: MIPS Msa SIMD instructions supported */
+-#endif
++#define PNG_SET_OPTION_SUPPORTED
++#define PNG_TARGET_SPECIFIC_CODE 0 /* HARDWARE: disable cpu specific code */
++#define PNG_ARM_NEON 0 /* HARDWARE: compatibility */
++#define PNG_MIPS_MSA 0 /* HARDWARE: compatibility */
++#define PNG_POWERPC_VSX 0 /* HARDWARE: compatibility */
++#define PNG_MIPS_MMI 2/* HARDWARE: MIPS: chose MMI over MSA */
++#define PNG_MAXIMUM_INFLATE_WINDOW 4 /* SOFTWARE: force maximum window */
++#define PNG_SKIP_sRGB_CHECK_PROFILE 6 /* SOFTWARE: Check ICC profile for sRGB */
++
+ #ifdef PNG_DISABLE_ADLER32_CHECK_SUPPORTED
++   /* This has to be disabled in some builds because of the lack of
++    * functionality in zlib.  Check the _SUPPORTED macro.
++    */
+ #  define PNG_IGNORE_ADLER32 8 /* SOFTWARE: disable Adler32 check on IDAT */
+ #endif
+-#ifdef PNG_POWERPC_VSX_API_SUPPORTED
+-#  define PNG_POWERPC_VSX   10 /* HARDWARE: PowerPC VSX SIMD instructions
+-                                * supported */
+-#endif
+-#ifdef PNG_MIPS_MMI_API_SUPPORTED
+-#  define PNG_MIPS_MMI   12 /* HARDWARE: MIPS MMI SIMD instructions supported */
+-#endif
+ 
+-#define PNG_OPTION_NEXT  14 /* Next option - numbers must be even */
++#define PNG_OPTION_NEXT 10
+ 
+ /* Return values: NOTE: there are four values and 'off' is *not* zero */
+-#define PNG_OPTION_UNSET   0 /* Unset - defaults to off */
++#define PNG_OPTION_UNSET   0 /* Unset - defaults as above */
+ #define PNG_OPTION_INVALID 1 /* Option number out of range */
+ #define PNG_OPTION_OFF     2
+ #define PNG_OPTION_ON      3
+ 
+ PNG_EXPORT(244, int, png_set_option, (png_structrp png_ptr, int option,
+    int onoff));
+-#endif /* SET_OPTION */
+ 
+ /*******************************************************************************
+  *  END OF HARDWARE AND SOFTWARE OPTIONS
+diff --git a/pngpriv.h b/pngpriv.h
+index 051a77ee92..92a6b8d8b7 100644
+--- a/pngpriv.h
++++ b/pngpriv.h
+@@ -71,6 +71,9 @@
+ #ifndef PNGLCONF_H
+ #  include "pnglibconf.h"
+ #endif
++#ifndef PNGTARGET_H
++#  include "pngtarget.h"
++#endif
+ 
+ /* Local renames may change non-exported API functions from png.h */
+ #if defined(PNG_PREFIX) && !defined(PNGPREFIX_H)
+@@ -88,196 +91,6 @@
+ #  endif
+ #endif
+ 
+-/* Compile time options.
+- * =====================
+- * In a multi-arch build the compiler may compile the code several times for the
+- * same object module, producing different binaries for different architectures.
+- * When this happens configure-time setting of the target host options cannot be
+- * done and this interferes with the handling of the ARM NEON optimizations, and
+- * possibly other similar optimizations.  Put additional tests here; in general
+- * this is needed when the same option can be changed at both compile time and
+- * run time depending on the target OS (i.e. iOS vs Android.)
+- *
+- * NOTE: symbol prefixing does not pass $(CFLAGS) to the preprocessor, because
+- * this is not possible with certain compilers (Oracle SUN OS CC), as a result
+- * it is necessary to ensure that all extern functions that *might* be used
+- * regardless of $(CFLAGS) get declared in this file.  The test on __ARM_NEON__
+- * below is one example of this behavior because it is controlled by the
+- * presence or not of -mfpu=neon on the GCC command line, it is possible to do
+- * this in $(CC), e.g. "CC=gcc -mfpu=neon", but people who build libpng rarely
+- * do this.
+- */
+-#ifndef PNG_ARM_NEON_OPT
+-   /* ARM NEON optimizations are being controlled by the compiler settings,
+-    * typically the target FPU.  If the FPU has been set to NEON (-mfpu=neon
+-    * with GCC) then the compiler will define __ARM_NEON__ and we can rely
+-    * unconditionally on NEON instructions not crashing, otherwise we must
+-    * disable use of NEON instructions.
+-    *
+-    * NOTE: at present these optimizations depend on 'ALIGNED_MEMORY', so they
+-    * can only be turned on automatically if that is supported too.  If
+-    * PNG_ARM_NEON_OPT is set in CPPFLAGS (to >0) then arm/arm_init.c will fail
+-    * to compile with an appropriate #error if ALIGNED_MEMORY has been turned
+-    * off.
+-    *
+-    * Note that gcc-4.9 defines __ARM_NEON instead of the deprecated
+-    * __ARM_NEON__, so we check both variants.
+-    *
+-    * To disable ARM_NEON optimizations entirely, and skip compiling the
+-    * associated assembler code, pass --enable-arm-neon=no to configure
+-    * or put -DPNG_ARM_NEON_OPT=0 in CPPFLAGS.
+-    */
+-#  if (defined(__ARM_NEON__) || defined(__ARM_NEON)) && \
+-   defined(PNG_ALIGNED_MEMORY_SUPPORTED)
+-#     define PNG_ARM_NEON_OPT 2
+-#  else
+-#     define PNG_ARM_NEON_OPT 0
+-#  endif
+-#endif
+-
+-#if PNG_ARM_NEON_OPT > 0
+-   /* NEON optimizations are to be at least considered by libpng, so enable the
+-    * callbacks to do this.
+-    */
+-#  define PNG_FILTER_OPTIMIZATIONS png_init_filter_functions_neon
+-#  ifndef PNG_ARM_NEON_IMPLEMENTATION
+-      /* Use the intrinsics code by default. */
+-#     define PNG_ARM_NEON_IMPLEMENTATION 1
+-#  endif
+-#else /* PNG_ARM_NEON_OPT == 0 */
+-#     define PNG_ARM_NEON_IMPLEMENTATION 0
+-#endif /* PNG_ARM_NEON_OPT > 0 */
+-
+-#ifndef PNG_MIPS_MSA_OPT
+-#  if defined(__mips_msa) && (__mips_isa_rev >= 5) && \
+-   defined(PNG_ALIGNED_MEMORY_SUPPORTED)
+-#     define PNG_MIPS_MSA_OPT 2
+-#  else
+-#     define PNG_MIPS_MSA_OPT 0
+-#  endif
+-#endif
+-
+-#ifndef PNG_MIPS_MMI_OPT
+-#  ifdef PNG_MIPS_MMI
+-#    if defined(__mips_loongson_mmi) && (_MIPS_SIM == _ABI64) && \
+-     defined(PNG_ALIGNED_MEMORY_SUPPORTED)
+-#       define PNG_MIPS_MMI_OPT 1
+-#    else
+-#       define PNG_MIPS_MMI_OPT 0
+-#    endif
+-#  else
+-#    define PNG_MIPS_MMI_OPT 0
+-#  endif
+-#endif
+-
+-#ifndef PNG_POWERPC_VSX_OPT
+-#  if defined(__PPC64__) && defined(__ALTIVEC__) && defined(__VSX__)
+-#     define PNG_POWERPC_VSX_OPT 2
+-#  else
+-#     define PNG_POWERPC_VSX_OPT 0
+-#  endif
+-#endif
+-
+-#ifndef PNG_LOONGARCH_LSX_OPT
+-#  if defined(__loongarch_sx)
+-#     define PNG_LOONGARCH_LSX_OPT 1
+-#  else
+-#     define PNG_LOONGARCH_LSX_OPT 0
+-#  endif
+-#endif
+-
+-#ifndef PNG_INTEL_SSE_OPT
+-      /* Only check for SSE if the build configuration has been modified to
+-       * enable SSE optimizations.  This means that these optimizations will
+-       * be off by default.  See contrib/intel for more details.
+-       */
+-#      if defined(__SSE4_1__) || defined(__AVX__) || defined(__SSSE3__) || \
+-       defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || \
+-       (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+-#         define PNG_INTEL_SSE_OPT 1
+-#      else
+-#         define PNG_INTEL_SSE_OPT 0
+-#      endif
+-#   else
+-#      define PNG_INTEL_SSE_OPT 0
+-#endif
+-
+-#if PNG_INTEL_SSE_OPT > 0
+-#   ifndef PNG_INTEL_SSE_IMPLEMENTATION
+-#      if defined(__SSE4_1__) || defined(__AVX__)
+-          /* We are not actually using AVX, but checking for AVX is the best
+-             way we can detect SSE4.1 and SSSE3 on MSVC.
+-          */
+-#         define PNG_INTEL_SSE_IMPLEMENTATION 3
+-#      elif defined(__SSSE3__)
+-#         define PNG_INTEL_SSE_IMPLEMENTATION 2
+-#      elif defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || \
+-       (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+-#         define PNG_INTEL_SSE_IMPLEMENTATION 1
+-#      else
+-#         define PNG_INTEL_SSE_IMPLEMENTATION 0
+-#      endif
+-#   endif
+-
+-#   if PNG_INTEL_SSE_IMPLEMENTATION > 0
+-#      define PNG_FILTER_OPTIMIZATIONS png_init_filter_functions_sse2
+-#   endif
+-#else
+-#   define PNG_INTEL_SSE_IMPLEMENTATION 0
+-#endif
+-
+-#if PNG_MIPS_MSA_OPT > 0
+-#  ifndef PNG_MIPS_MSA_IMPLEMENTATION
+-#     if defined(__mips_msa)
+-#        if defined(__clang__)
+-#        elif defined(__GNUC__)
+-#           if __GNUC__ < 4 || (__GNUC__ == 4 && __GNUC_MINOR__ < 7)
+-#              define PNG_MIPS_MSA_IMPLEMENTATION 2
+-#           endif /* no GNUC support */
+-#        endif /* __GNUC__ */
+-#     else /* !defined __mips_msa */
+-#        define PNG_MIPS_MSA_IMPLEMENTATION 2
+-#     endif /* __mips_msa */
+-#  endif /* !PNG_MIPS_MSA_IMPLEMENTATION */
+-
+-#  ifndef PNG_MIPS_MSA_IMPLEMENTATION
+-#     define PNG_MIPS_MSA_IMPLEMENTATION 1
+-#     define PNG_FILTER_OPTIMIZATIONS png_init_filter_functions_mips
+-#  endif
+-#else
+-#  define PNG_MIPS_MSA_IMPLEMENTATION 0
+-#endif /* PNG_MIPS_MSA_OPT > 0 */
+-
+-#if PNG_MIPS_MMI_OPT > 0
+-#  ifndef PNG_MIPS_MMI_IMPLEMENTATION
+-#     if defined(__mips_loongson_mmi) && (_MIPS_SIM == _ABI64)
+-#        define PNG_MIPS_MMI_IMPLEMENTATION 2
+-#     else /* !defined __mips_loongson_mmi  || _MIPS_SIM != _ABI64 */
+-#        define PNG_MIPS_MMI_IMPLEMENTATION 0
+-#     endif /* __mips_loongson_mmi  && _MIPS_SIM == _ABI64 */
+-#  endif /* !PNG_MIPS_MMI_IMPLEMENTATION */
+-
+-#   if PNG_MIPS_MMI_IMPLEMENTATION > 0
+-#      define PNG_FILTER_OPTIMIZATIONS png_init_filter_functions_mips
+-#   endif
+-#else
+-#   define PNG_MIPS_MMI_IMPLEMENTATION 0
+-#endif /* PNG_MIPS_MMI_OPT > 0 */
+-
+-#if PNG_POWERPC_VSX_OPT > 0
+-#  define PNG_FILTER_OPTIMIZATIONS png_init_filter_functions_vsx
+-#  define PNG_POWERPC_VSX_IMPLEMENTATION 1
+-#else
+-#  define PNG_POWERPC_VSX_IMPLEMENTATION 0
+-#endif
+-
+-#if PNG_LOONGARCH_LSX_OPT > 0
+-#   define PNG_FILTER_OPTIMIZATIONS png_init_filter_functions_lsx
+-#   define PNG_LOONGARCH_LSX_IMPLEMENTATION 1
+-#else
+-#   define PNG_LOONGARCH_LSX_IMPLEMENTATION 0
+-#endif
+-
+ /* Is this a build of a DLL where compilation of the object modules requires
+  * different preprocessor settings to those required for a simple library?  If
+  * so PNG_BUILD_DLL must be set.
+@@ -1287,105 +1100,39 @@ PNG_INTERNAL_FUNCTION(void,png_do_write_interlace,(png_row_infop row_info,
+ PNG_INTERNAL_FUNCTION(void,png_read_filter_row,(png_structrp pp, png_row_infop
+     row_info, png_bytep row, png_const_bytep prev_row, int filter),PNG_EMPTY);
+ 
+-#if PNG_ARM_NEON_OPT > 0
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_up_neon,(png_row_infop row_info,
+-    png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_sub3_neon,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_sub4_neon,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_avg3_neon,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_avg4_neon,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_paeth3_neon,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_paeth4_neon,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-#endif
+-
+-#if PNG_MIPS_MSA_IMPLEMENTATION == 1
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_up_msa,(png_row_infop row_info,
+-    png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_sub3_msa,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_sub4_msa,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_avg3_msa,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_avg4_msa,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_paeth3_msa,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_paeth4_msa,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-#endif
+-
+-#if PNG_MIPS_MMI_IMPLEMENTATION > 0
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_up_mmi,(png_row_infop row_info,
+-    png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_sub3_mmi,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_sub4_mmi,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_avg3_mmi,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_avg4_mmi,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_paeth3_mmi,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_paeth4_mmi,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-#endif
+-
+-#if PNG_POWERPC_VSX_OPT > 0
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_up_vsx,(png_row_infop row_info,
+-    png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_sub3_vsx,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_sub4_vsx,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_avg3_vsx,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_avg4_vsx,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_paeth3_vsx,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_paeth4_vsx,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-#endif
+-
+-#if PNG_INTEL_SSE_IMPLEMENTATION > 0
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_sub3_sse2,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_sub4_sse2,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_avg3_sse2,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_avg4_sse2,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_paeth3_sse2,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_paeth4_sse2,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-#endif
+-
+-#if PNG_LOONGARCH_LSX_IMPLEMENTATION == 1
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_up_lsx,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_sub3_lsx,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_sub4_lsx,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_avg3_lsx,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_avg4_lsx,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_paeth3_lsx,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(void,png_read_filter_row_paeth4_lsx,(png_row_infop
+-    row_info, png_bytep row, png_const_bytep prev_row),PNG_EMPTY);
+-#endif
++#ifdef PNG_TARGET_CODE_IMPLEMENTATION
++/* png_struct::target_state contains a cache of these flags and updates
++ * it as required during read.  The hardware implementation may also do
++ * this, for example if it determines that hardware optimization is not
++ * available for this image.
++ */
++#define png_target_filters 1 /* MASK: hardware support for filters */
++#define png_target_expand_palette 2 /* MASK: hardware support for palettes */
++
++PNG_INTERNAL_FUNCTION(void,png_target_init,(png_structrp),PNG_EMPTY);
++   /* Initialize png_struct::target_state if required. */
++
++PNG_INTERNAL_FUNCTION(void,png_target_free_data,(png_structrp),PNG_EMPTY);
++   /* Free any data allocated in the png_struct::target_data.
++    */
++
++PNG_INTERNAL_FUNCTION(void, png_target_init_filter_functions,
++    (png_structp png_ptr, unsigned int bpp), PNG_EMPTY);
++   /* The filter function initializer that selects the specific hardware
++    * implementation.  Called once before the first row needs to be defiltered.
++    */
++
++/* Handlers for specific transforms (currently only 'expand_palette').  These
++ * are implemented in pngsimd.c to call the actual SIMD implementation if
++ * required.
++ *
++ * The handlers return "false" if nothing was done and the C code will then be
++ * called.  The implementations must do everything or nothing.
++ */
++PNG_INTERNAL_FUNCTION(int, png_target_do_expand_palette,
++      (png_structrp, png_row_infop), PNG_EMPTY);
++   /* Expand the palette and return true or do nothing and return false. */
++#endif /* TARGET_CODE */
+ 
+ /* Choose the best filter to use and filter the row data */
+ PNG_INTERNAL_FUNCTION(void,png_write_find_filter,(png_structrp png_ptr,
+@@ -2112,72 +1859,9 @@ PNG_INTERNAL_FUNCTION(void, png_image_free, (png_imagep image), PNG_EMPTY);
+ 
+ #endif /* SIMPLIFIED READ/WRITE */
+ 
+-/* These are initialization functions for hardware specific PNG filter
+- * optimizations; list these here then select the appropriate one at compile
+- * time using the macro PNG_FILTER_OPTIMIZATIONS.  If the macro is not defined
+- * the generic code is used.
+- */
+-#ifdef PNG_FILTER_OPTIMIZATIONS
+-PNG_INTERNAL_FUNCTION(void, PNG_FILTER_OPTIMIZATIONS, (png_structp png_ptr,
+-   unsigned int bpp), PNG_EMPTY);
+-   /* Just declare the optimization that will be used */
+-#else
+-   /* List *all* the possible optimizations here - this branch is required if
+-    * the builder of libpng passes the definition of PNG_FILTER_OPTIMIZATIONS in
+-    * CFLAGS in place of CPPFLAGS *and* uses symbol prefixing.
+-    */
+-#  if PNG_ARM_NEON_OPT > 0
+-PNG_INTERNAL_FUNCTION(void, png_init_filter_functions_neon,
+-   (png_structp png_ptr, unsigned int bpp), PNG_EMPTY);
+-#endif
+-
+-#if PNG_MIPS_MSA_IMPLEMENTATION == 1
+-PNG_INTERNAL_FUNCTION(void, png_init_filter_functions_mips,
+-   (png_structp png_ptr, unsigned int bpp), PNG_EMPTY);
+-#endif
+-
+-#  if PNG_MIPS_MMI_IMPLEMENTATION > 0
+-PNG_INTERNAL_FUNCTION(void, png_init_filter_functions_mips,
+-   (png_structp png_ptr, unsigned int bpp), PNG_EMPTY);
+-#  endif
+-
+-#  if PNG_INTEL_SSE_IMPLEMENTATION > 0
+-PNG_INTERNAL_FUNCTION(void, png_init_filter_functions_sse2,
+-   (png_structp png_ptr, unsigned int bpp), PNG_EMPTY);
+-#  endif
+-#endif
+-
+-#if PNG_LOONGARCH_LSX_OPT > 0
+-PNG_INTERNAL_FUNCTION(void, png_init_filter_functions_lsx,
+-    (png_structp png_ptr, unsigned int bpp), PNG_EMPTY);
+-#endif
+-
+ PNG_INTERNAL_FUNCTION(png_uint_32, png_check_keyword, (png_structrp png_ptr,
+    png_const_charp key, png_bytep new_key), PNG_EMPTY);
+ 
+-#if PNG_ARM_NEON_IMPLEMENTATION == 1
+-PNG_INTERNAL_FUNCTION(void,
+-                      png_riffle_palette_neon,
+-                      (png_structrp),
+-                      PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(int,
+-                      png_do_expand_palette_rgba8_neon,
+-                      (png_structrp,
+-                       png_row_infop,
+-                       png_const_bytep,
+-                       const png_bytepp,
+-                       const png_bytepp),
+-                      PNG_EMPTY);
+-PNG_INTERNAL_FUNCTION(int,
+-                      png_do_expand_palette_rgb8_neon,
+-                      (png_structrp,
+-                       png_row_infop,
+-                       png_const_bytep,
+-                       const png_bytepp,
+-                       const png_bytepp),
+-                      PNG_EMPTY);
+-#endif
+-
+ /* Maintainer: Put new private prototypes here ^ */
+ 
+ #include "pngdebug.h"
+diff --git a/pngread.c b/pngread.c
+index e29218b394..319153b743 100644
+--- a/pngread.c
++++ b/pngread.c
+@@ -68,6 +68,15 @@ png_create_read_struct_2,(png_const_charp user_png_ver, png_voidp error_ptr,
+ #        endif
+ #     endif
+ 
++#     ifdef PNG_TARGET_CODE_IMPLEMENTATION /* target specific code */
++         /* Current support is read-only so this happens here, not in the
++          * general creation.  It could easily be moved.
++          */
++         png_target_init(png_ptr);
++         if (png_ptr->target_state != 0U)
++            png_set_option(png_ptr, PNG_TARGET_SPECIFIC_CODE, 1);
++#     endif
++
+       /* TODO: delay this, it can be done in png_init_io (if the app doesn't
+        * do it itself) avoiding setting the default function if it is not
+        * required.
+@@ -1002,10 +1011,10 @@ png_read_destroy(png_structrp png_ptr)
+    png_ptr->chunk_list = NULL;
+ #endif
+ 
+-#if defined(PNG_READ_EXPAND_SUPPORTED) && \
+-    defined(PNG_ARM_NEON_IMPLEMENTATION)
+-   png_free(png_ptr, png_ptr->riffled_palette);
+-   png_ptr->riffled_palette = NULL;
++#ifdef PNG_TARGET_STORES_DATA
++   if (png_ptr->target_data != NULL)
++      png_target_free_data(png_ptr);
++   png_ptr->target_data = NULL;
+ #endif
+ 
+    /* NOTE: the 'setjmp' buffer may still be allocated and the memory and error
+diff --git a/pngrtran.c b/pngrtran.c
+index 1526123e02..545e97b644 100644
+--- a/pngrtran.c
++++ b/pngrtran.c
+@@ -18,17 +18,6 @@
+ 
+ #include "pngpriv.h"
+ 
+-#ifdef PNG_ARM_NEON_IMPLEMENTATION
+-#  if PNG_ARM_NEON_IMPLEMENTATION == 1
+-#    define PNG_ARM_NEON_INTRINSICS_AVAILABLE
+-#    if defined(_MSC_VER) && !defined(__clang__) && defined(_M_ARM64)
+-#      include <arm64_neon.h>
+-#    else
+-#      include <arm_neon.h>
+-#    endif
+-#  endif
+-#endif
+-
+ #ifdef PNG_READ_SUPPORTED
+ 
+ /* Set the action on getting a CRC error for an ancillary or critical chunk. */
+@@ -4202,9 +4191,8 @@ png_do_encode_alpha(png_row_infop row_info, png_bytep row, png_structrp png_ptr)
+  * upon whether you supply trans and num_trans.
+  */
+ static void
+-png_do_expand_palette(png_structrp png_ptr, png_row_infop row_info,
+-    png_bytep row, png_const_colorp palette, png_const_bytep trans_alpha,
+-    int num_trans)
++png_do_expand_palette(png_row_infop row_info, png_bytep row, png_const_colorp
++      palette, png_const_bytep trans_alpha, int num_trans)
+ {
+    int shift, value;
+    png_bytep sp, dp;
+@@ -4309,21 +4297,7 @@ png_do_expand_palette(png_structrp png_ptr, png_row_infop row_info,
+                dp = row + ((size_t)row_width << 2) - 1;
+ 
+                i = 0;
+-#ifdef PNG_ARM_NEON_INTRINSICS_AVAILABLE
+-               if (png_ptr->riffled_palette != NULL)
+-               {
+-                  /* The RGBA optimization works with png_ptr->bit_depth == 8
+-                   * but sometimes row_info->bit_depth has been changed to 8.
+-                   * In these cases, the palette hasn't been riffled.
+-                   */
+-                  i = png_do_expand_palette_rgba8_neon(png_ptr, row_info, row,
+-                      &sp, &dp);
+-               }
+-#else
+-               PNG_UNUSED(png_ptr)
+-#endif
+-
+-               for (; i < row_width; i++)
++               for (i = 0; i < row_width; i++)
+                {
+                   if ((int)(*sp) >= num_trans)
+                      *dp-- = 0xff;
+@@ -4345,15 +4319,7 @@ png_do_expand_palette(png_structrp png_ptr, png_row_infop row_info,
+             {
+                sp = row + (size_t)row_width - 1;
+                dp = row + (size_t)(row_width * 3) - 1;
+-               i = 0;
+-#ifdef PNG_ARM_NEON_INTRINSICS_AVAILABLE
+-               i = png_do_expand_palette_rgb8_neon(png_ptr, row_info, row,
+-                   &sp, &dp);
+-#else
+-               PNG_UNUSED(png_ptr)
+-#endif
+-
+-               for (; i < row_width; i++)
++               for (i = 0; i < row_width; i++)
+                {
+                   *dp-- = palette[*sp].blue;
+                   *dp-- = palette[*sp].green;
+@@ -4767,19 +4733,14 @@ png_do_read_transformations(png_structrp png_ptr, png_row_infop row_info)
+    {
+       if (row_info->color_type == PNG_COLOR_TYPE_PALETTE)
+       {
+-#ifdef PNG_ARM_NEON_INTRINSICS_AVAILABLE
+-         if ((png_ptr->num_trans > 0) && (png_ptr->bit_depth == 8))
+-         {
+-            if (png_ptr->riffled_palette == NULL)
+-            {
+-               /* Initialize the accelerated palette expansion. */
+-               png_ptr->riffled_palette =
+-                   (png_bytep)png_malloc(png_ptr, 256 * 4);
+-               png_riffle_palette_neon(png_ptr);
+-            }
+-         }
++#ifdef PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE
++         /* Do not call 'png_do_expand_palette' if the SIMD implementation
++          * does it (note that this accomodates SIMD implementations which might
++          * only handle specific cases).
++          */
++         if (!png_target_do_expand_palette(png_ptr, row_info))
+ #endif
+-         png_do_expand_palette(png_ptr, row_info, png_ptr->row_buf + 1,
++         png_do_expand_palette(row_info, png_ptr->row_buf + 1,
+              png_ptr->palette, png_ptr->trans_alpha, png_ptr->num_trans);
+       }
+ 
+diff --git a/pngrutil.c b/pngrutil.c
+index 6dd1cf5f17..89b36e30ff 100644
+--- a/pngrutil.c
++++ b/pngrutil.c
+@@ -376,7 +376,6 @@ png_inflate_claim(png_structrp png_ptr, png_uint_32 owner)
+ #if ZLIB_VERNUM >= 0x1240
+       int window_bits = 0;
+ 
+-# if defined(PNG_SET_OPTION_SUPPORTED) && defined(PNG_MAXIMUM_INFLATE_WINDOW)
+       if (((png_ptr->options >> PNG_MAXIMUM_INFLATE_WINDOW) & 3) ==
+           PNG_OPTION_ON)
+       {
+@@ -388,8 +387,6 @@ png_inflate_claim(png_structrp png_ptr, png_uint_32 owner)
+       {
+          png_ptr->zstream_start = 1;
+       }
+-# endif
+-
+ #endif /* ZLIB_VERNUM >= 0x1240 */
+ 
+       /* Set this for safety, just in case the previous owner left pointers to
+@@ -4151,27 +4148,15 @@ png_init_filter_functions(png_structrp pp)
+       pp->read_filter[PNG_FILTER_VALUE_PAETH-1] =
+          png_read_filter_row_paeth_multibyte_pixel;
+ 
+-#ifdef PNG_FILTER_OPTIMIZATIONS
+-   /* To use this define PNG_FILTER_OPTIMIZATIONS as the name of a function to
+-    * call to install hardware optimizations for the above functions; simply
+-    * replace whatever elements of the pp->read_filter[] array with a hardware
+-    * specific (or, for that matter, generic) optimization.
+-    *
+-    * To see an example of this examine what configure.ac does when
+-    * --enable-arm-neon is specified on the command line.
+-    */
+-   PNG_FILTER_OPTIMIZATIONS(pp, bpp);
+-#endif
++#  ifdef PNG_TARGET_IMPLEMENTS_FILTERS
++      png_target_init_filter_functions(pp, bpp);
++#  endif
+ }
+ 
+ void /* PRIVATE */
+ png_read_filter_row(png_structrp pp, png_row_infop row_info, png_bytep row,
+     png_const_bytep prev_row, int filter)
+ {
+-   /* OPTIMIZATION: DO NOT MODIFY THIS FUNCTION, instead #define
+-    * PNG_FILTER_OPTIMIZATIONS to a function that overrides the generic
+-    * implementations.  See png_init_filter_functions above.
+-    */
+    if (filter > PNG_FILTER_VALUE_NONE && filter < PNG_FILTER_VALUE_LAST)
+    {
+       if (pp->read_filter[0] == NULL)
+@@ -4648,7 +4633,7 @@ defined(PNG_USER_TRANSFORM_PTR_SUPPORTED)
+ 
+       png_ptr->big_prev_row = (png_bytep)png_malloc(png_ptr, row_bytes + 48);
+ 
+-#ifdef PNG_ALIGNED_MEMORY_SUPPORTED
++#if PNG_TARGET_ROW_ALIGNMENT > 1
+       /* Use 16-byte aligned memory for row_buf with at least 16 bytes
+        * of padding before and after row_buf; treat prev_row similarly.
+        * NOTE: the alignment is to the start of the pixels, one beyond the start
+diff --git a/pngsimd.c b/pngsimd.c
+new file mode 100644
+index 0000000000..8a35f53920
+--- /dev/null
++++ b/pngsimd.c
+@@ -0,0 +1,145 @@
++
++/* pngsimd.c - hardware (cpu/arch) specific code
++ *
++ * Copyright (c) 2018-2024 Cosmin Truta
++ * Copyright (c) 1998-2002,2004,2006-2018 Glenn Randers-Pehrson
++ * Copyright (c) 1996-1997 Andreas Dilger
++ * Copyright (c) 1995-1996 Guy Eric Schalnat, Group 42, Inc.
++ *
++ * This code is released under the libpng license.
++ * For conditions of distribution and use, see the disclaimer
++ * and license in png.h
++ */
++#include "pngpriv.h"
++
++#ifdef PNG_TARGET_CODE_IMPLEMENTATION
++/* This is set by pngtarget.h iff there is some target code to be compiled.
++ */
++
++/* Each piece of separate hardware support code must have a "init" file defined
++ * in PNG_TARGET_CODE_IMPLEMENTATION and included here.
++ *
++ * The "check" header set PNG_TARGET_CODE_IMPLEMENTATION and that file *MUST*
++ * supply macro definitions as follows.  Note that all functions must be static
++ * to avoid clashes with other implementations.
++ *
++ *    png_target_impl
++ *       string constant
++ *       REQUIRED
++ *       This must be a string naming the implemenation.
++ *
++ *    png_target_free_data_impl
++ *       static void png_target_free_data_impl(png_structrp)
++ *       REQUIRED if PNG_TARGET_STORES_DATA is defined
++ *       UNDEFINED if PNG_TARGET_STORES_DATA is not defined
++ *       A function to free data stored in png_struct::target_data.
++ *
++ *    png_target_init_filter_functions_impl [flag: png_target_filters]
++ *       OPTIONAL
++ *       Contains code to overwrite the png_struct::read_filter array, see
++ *       the definition of png_init_filter_functions.  Need not be defined,
++ *       only called if target_state contains png_target_filters.
++ *
++ *    png_target_do_expand_palette_impl   [flag: png_target_expand_palette]
++ *       static function
++ *       OPTIONAL
++ *       Handles the transform.  Need not be defined, only called if the
++ *       state contains png_target_<transform>, may set this flag to zero, may
++ *       return false to indicate that the transform was not done (so the
++ *       C implementation must then execute).
++ *
++ * Note that pngtarget.h verifies that at least one thing is implemented, the
++ * checks below ensure that the corresponding _impl macro is defined.
++ */
++
++/* This will fail in an obvious way with a meaningful error message if the file
++ * does not exist:
++ */
++#include PNG_TARGET_CODE_IMPLEMENTATION
++
++#ifndef png_target_impl
++#  error TARGET SPECIFIC CODE: PNG_TARGET_CODE_IMPLEMENTATION is defined but\
++ png_hareware_impl is not
++#endif
++
++#if defined(PNG_TARGET_STORES_DATA) != defined(png_target_free_data_impl)
++#  error TARGET SPECIFIC CODE: png_target_free_data_impl unexpected setting
++#endif
++
++#if defined(PNG_TARGET_IMPLEMENTS_FILTERS) !=\
++    defined(png_target_init_filter_functions_impl)
++#  error TARGET SPECIFIC CODE: png_target_init_filter_functions_impl unexpected\
++      setting
++#endif
++
++#if defined(PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE) !=\
++    defined(png_target_do_expand_palette_impl)
++#  error TARGET SPECIFIC CODE: png_target_do_expand_palette_impl unexpected\
++      setting
++#endif
++
++void
++png_target_init(png_structrp pp)
++{
++   /* Initialize png_struct::target_state if required. */
++#  ifdef png_target_init_filter_functions_impl
++#     define PNG_TARGET_FILTER_SUPPORT png_target_filters
++#  else
++#     define PNG_TARGET_FILTER_SUPPORT 0U
++#  endif
++#  ifdef png_target_do_expand_palette_impl
++#     define PNG_TARGET_EXPAND_PALETTE_SUPPORT png_target_expand_palette
++#  else
++#     define PNG_TARGET_EXPAND_PALETTE_SUPPORT 0U
++#  endif
++
++#  define PNG_TARGET_SUPPORT (PNG_TARGET_FILTER_SUPPORT |\
++                              PNG_TARGET_EXPAND_PALETTE_SUPPORT)
++
++#  if PNG_TARGET_SUPPORT != 0U
++      pp->target_state = PNG_TARGET_SUPPORT;
++#  else
++      PNG_UNUSED(pp);
++#  endif
++}
++
++#ifdef PNG_TARGET_STORES_DATA
++void
++png_target_free_data(png_structrp pp)
++{
++   /* Free any data allocated in the png_struct::target_data.
++    */
++   if (pp->target_data != NULL)
++   {
++      png_target_free_data_impl(pp);
++      if (pp->target_data != NULL)
++         png_error(pp, png_target_impl ": allocated data not released");
++   }
++}
++#endif
++
++#ifdef PNG_TARGET_IMPLEMENTS_FILTERS
++void
++png_target_init_filter_functions(png_structp pp, unsigned int bpp)
++{
++   if (((pp->options >> PNG_TARGET_SPECIFIC_CODE) & 3) == PNG_OPTION_ON &&
++       (pp->target_state & png_target_filters) != 0)
++      png_target_init_filter_functions_impl(pp, bpp);
++}
++#endif /* filters */
++
++#ifdef PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE
++int
++png_target_do_expand_palette(png_structrp pp, png_row_infop rip)
++   /*png_const_bytep row, const png_bytepp ssp, const png_bytepp ddp) */
++{
++   /* This is exactly like 'png_do_expand_palette' except that there is a check
++    * on the options and target_state:
++    */
++   return ((pp->options >> PNG_TARGET_SPECIFIC_CODE) & 3) == PNG_OPTION_ON &&
++      (pp->target_state & png_target_expand_palette) != 0 &&
++      png_target_do_expand_palette_impl(pp, rip, pp->row_buf + 1,
++            pp->palette, pp->trans_alpha, pp->num_trans);
++}
++#endif /* EXPAND_PALETTE */
++#endif /* PNG_TARGET_ARCH */
+diff --git a/pngstruct.h b/pngstruct.h
+index ad85bada07..39d94665c0 100644
+--- a/pngstruct.h
++++ b/pngstruct.h
+@@ -342,9 +342,7 @@ struct png_struct_def
+ #endif
+ 
+ /* Options */
+-#ifdef PNG_SET_OPTION_SUPPORTED
+    png_uint_32 options;           /* On/off state (up to 16 options) */
+-#endif
+ 
+ /* New members added in libpng-1.0.6 */
+ 
+@@ -375,12 +373,6 @@ struct png_struct_def
+    /* deleted in 1.5.5: rgb_to_gray_blue_coeff; */
+ #endif
+ 
+-/* New member added in libpng-1.6.36 */
+-#if defined(PNG_READ_EXPAND_SUPPORTED) && \
+-    defined(PNG_ARM_NEON_IMPLEMENTATION)
+-   png_bytep riffled_palette; /* buffer for accelerated palette expansion */
+-#endif
+-
+ /* New member added in libpng-1.0.4 (renamed in 1.0.9) */
+ #if defined(PNG_MNG_FEATURES_SUPPORTED)
+ /* Changed from png_byte to png_uint_32 at version 1.2.0 */
+@@ -468,5 +460,18 @@ struct png_struct_def
+    png_colorspace   colorspace;
+ #endif
+ #endif
++
++/* NOTE: prior to libpng-1.8 this also checked that PNG_ARM_NEON_IMPLEMENTATION
++ * is defined, however it was always defined...  The code also checked that
++ * READ_EXPAND is supported but that will lead to bugs when some hardware
++ * implementation uses it for some other palette related thing.
++ * [[libpng-1.8]] changed to target_data for storing arbitrary data.
++ */
++#ifdef PNG_TARGET_CODE_IMPLEMENTATION /* file providing target specific code */
++#  ifdef PNG_TARGET_STORES_DATA
++      png_voidp   target_data;
++#  endif
++   png_uint_32 target_state; /* managed by libpng */
++#endif
+ };
+ #endif /* PNGSTRUCT_H */
+diff --git a/pngtarget.h b/pngtarget.h
+new file mode 100644
+index 0000000000..e6c7e6a52b
+--- /dev/null
++++ b/pngtarget.h
+@@ -0,0 +1,130 @@
++
++/* pngtarget.h - target configuration file for libpng
++ *
++ * libpng version 1.6.44.git
++ *
++ * Copyright (c) 2024 John Bowler
++ *
++ * This code is released under the libpng license.
++ * For conditions of distribution and use, see the disclaimer
++ * and license in png.h
++ *
++ * [[Added to libpng1.8]]
++ *
++ * This header file discovers whether the target machine has support for target
++ * (normally CPU) specific code such as SIMD instructions.  It is included by
++ * pngpriv.h immediately after pnglibconf.h to establish compile-time (as
++ * opposed to configuration time) requirements for the build of libpng
++ *
++ * The header only defines a very limited number of macros and it only defines
++ * macros; no functions are declared, no types etc.
++ *
++ * Every target architecture <arch> must have the following file:
++ *
++ *    <arch>/check.h
++ *
++ * This file contains checks based on compiler flags to determine if
++ * target-specific code can be implemented for this architecture with this set
++ * of compiler options.  Define
++ *
++ *    PNG_TARGET_CODE_IMPLEMENTATION
++ *
++ * To the quoted relative path name of a single C file to include to obtain the
++ * implementation of the the target specific code.  For example:
++ *
++ *    "arm/arm_init.c"
++ *    "intel/intel_init.c"
++ *
++ * This file will be included by pngsmid.c so the string must be a valid
++ * relative path name from that file.  See the file pngsmid.c for the definition
++ * of what the C file must do.
++ *
++ * When it defines PNG_TARGET_CODE_IMPLEMENTATION the check file may also
++ * define:
++ *
++ *    PNG_TARGET_STORES_DATA
++ *       If set a png_voidp pointer called "target_data" will be defined in
++ *       pngstruct.h.  The initialization code included in pngsimd.c must then
++ *       also implement a function to free the data called png_target_free_data,
++ *       see png_simd.c.
++ *
++ *    PNG_TARGET_ROW_ALIGNMENT
++ *       If set this defines a power-of-2 required memory alignment for rows
++ *       passed to the read "filter".  If not set this defaults to 1.
++ *
++ *    PNG_TARGET_IMPLEMENTS_FILTERS
++ *       If defined this indicates to the system that target specific
++ *       implementations of the read filters may be available.  This must be set
++ *       to cause a target specific filter implementation to be used.
++ *
++ *    PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE
++ *       If defined this indicates to the system that target specific
++ *       code for rgb_do_expand_palette is available.  This must be defined to
++ *       cause such implementations to be used.
++ *
++ * It MUST NOT define these macros unless it also defines
++ * PNG_TARGET_CODE_IMPLEMENTATION.  At least one of the 'IMPLEMENTS' macros must
++ * be defined; this file will produce an error diagnostic if not.
++ *
++ * If the check.h file needs to define other macros, for example for use in the
++ * PNG_TARGET_CODE_IMPLEMENTATION file macros must have the form:
++ *
++ *    PNG_TARGET_<ARCH>_...
++ *
++ * Where ARCH the architecture directory (the directory containing check.h) in
++ * upper case.  See pngsimd.c for more information about function definitions
++ * used to implement the code.
++ */
++#ifndef PNGTARGET_H
++#define PNGTARGET_H
++
++#ifdef PNG_TARGET_SPECIFIC_CODE_SUPPORTED /* from pnglibconf.h */
++#  ifdef PNG_READ_SUPPORTED /* checked here as a convenience */
++#     include "arm/check.h"
++#     include "intel/check.h"
++#     include "mips/check.h"
++#     include "powerpc/check.h"
++#endif
++#endif /* PNG_TARGET_SPECIFIC_CODE_SUPPORTED */
++
++/* This is also a convenience to avoid checking in every check.h: */
++#ifndef PNG_READ_EXPAND_SUPPORTED
++#  undef PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE
++#endif
++
++/* Now check the condition above.  Note that these checks consider the composite
++ * result of all the above includes; if errors are preceded by warnings about
++ * redefinition of the macros those need to be fixed first.
++ */
++#ifdef PNG_TARGET_CODE_IMPLEMENTATION /* There is target-specific code */
++/* List all the supported target specific code types here: */
++#  if !defined(PNG_TARGET_IMPLEMENTS_FILTERS) &&\
++      !defined(PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE)
++#  error PNG_TARGET_CODE_IMPLEMENTATION without any implementations.
++
++/* Currently only row alignments which are a power of 2 and less than 17 are
++ * supported: the current code always aligns to 16 bytes (but may not in the
++ * future).
++ */
++#  if defined(PNG_TARGET_ROW_ALIGNMENT) && (\
++      PNG_TARGET_ROW_ALIGNMENT > 16 /*too big*/ ||\
++      PNG_TARGET_ROW_ALIGNMENT !=\
++      (PNG_TARGET_ROW_ALIGNMENT & -PNG_TARGET_ROW_ALIGNMENT)) /*!power of 2*/
++#     error unsupported TARGET_ROW_ALIGNMENT
++#  endif /* PNG_TARGET_ROW_ALIGNMENT check */
++#endif /* Target specific code macro checks. */
++#endif /* PNG_TARGET_SPECIFIC_CODE_SUPPORTED */
++
++#ifndef PNG_TARGET_CODE_IMPLEMENTATION
++#  if defined(PNG_TARGET_STORES_DATA) ||\
++      defined(PNG_TARGET_ROW_ALIGNMENT) ||\
++      defined(PNG_TARGET_IMPLEMENTS_FILTERS) ||\
++      defined(PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE)
++#     error PNG_TARGET_ macro defined without target specfic code.
++#  endif /* Check PNG_TARGET_ macros are not defined. */
++#endif /* PNG_TARGET_CODE_IMPLEMENTATION */
++
++#ifndef PNG_TARGET_ROW_ALIGNMENT
++#  define PNG_TARGET_ROW_ALIGNMENT 1
++#endif
++#endif /* PNGTARGET_H */
+diff --git a/pngtest.c b/pngtest.c
+index 6490319459..1a319da516 100644
+--- a/pngtest.c
++++ b/pngtest.c
+@@ -36,6 +36,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#define STDERR stdout
+ 
+ #ifdef PNG_ZLIB_HEADER
+ #  include PNG_ZLIB_HEADER /* defined by pnglibconf.h from 1.7 */
+diff --git a/powerpc/check.h b/powerpc/check.h
+new file mode 100644
+index 0000000000..dc09d494b8
+--- /dev/null
++++ b/powerpc/check.h
+@@ -0,0 +1,22 @@
++/* powerpc/check.h - POWERPC optimised filter functions
++ *
++ * Copyright (c) 2018 Cosmin Truta
++ * Copyright (c) 2017 Glenn Randers-Pehrson
++ * Written by Vadim Barkov, 2017.
++ *
++ * This code is released under the libpng license.
++ * For conditions of distribution and use, see the disclaimer
++ * and license in png.h
++ */
++#if defined(__PPC64__) && defined(__ALTIVEC__) && defined(PNG_READ_SUPPORTED)
++
++#include <altivec.h>
++
++#ifdef __VSX__
++#  define PNG_TARGET_CODE_IMPLEMENTATION "powerpc/powerpc_init.c"
++   /* PNG_TARGET_STORES_DATA */
++#  define PNG_TARGET_IMPLEMENTS_FILTERS
++   /* PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE */
++   /* PNG_TARGET_ROW_ALIGNMENT */
++#endif /* __VSX__ */
++#endif /* __PPC64__ && __ALTIVEC__ && READ */
+diff --git a/powerpc/filter_vsx_intrinsics.c b/powerpc/filter_vsx_intrinsics.c
+index 01cf8800dc..ee4edb08b0 100644
+--- a/powerpc/filter_vsx_intrinsics.c
++++ b/powerpc/filter_vsx_intrinsics.c
+@@ -9,27 +9,9 @@
+  * and license in png.h
+  */
+ 
+-#include <stdio.h>
+-#include <stdint.h>
+-#include "../pngpriv.h"
+-
+-#ifdef PNG_READ_SUPPORTED
+-
+-/* This code requires -maltivec and -mvsx on the command line: */
+-#if PNG_POWERPC_VSX_IMPLEMENTATION == 1 /* intrinsics code from pngpriv.h */
+-
+-#include <altivec.h>
+-
+-#if PNG_POWERPC_VSX_OPT > 0
+-
+-#ifndef __VSX__
+-#  error "This code requires VSX support (POWER7 and later). Please provide -mvsx compiler flag."
+-#endif
+-
+ #define vec_ld_unaligned(vec,data) vec = vec_vsx_ld(0,data)
+ #define vec_st_unaligned(vec,data) vec_vsx_st(vec,0,data)
+ 
+-
+ /* Functions in this file look at most 3 pixels (a,b,c) to predict the 4th (d).
+  * They're positioned like this:
+  *    prev:  c b
+@@ -55,8 +37,9 @@
+       istop = 0;\
+    }
+ 
+-void png_read_filter_row_up_vsx(png_row_infop row_info, png_bytep row,
+-                                png_const_bytep prev_row)
++static void
++png_read_filter_row_up_vsx(png_row_infop row_info, png_bytep row,
++   png_const_bytep prev_row)
+ {
+    vector unsigned char rp_vec;
+    vector unsigned char pp_vec;
+@@ -97,8 +80,7 @@ void png_read_filter_row_up_vsx(png_row_infop row_info, png_bytep row,
+          *rp = (png_byte)(((int)(*rp) + (int)(*pp++)) & 0xff);
+          rp++;
+       }
+-}
+-
++   }
+ }
+ 
+ static const vector unsigned char VSX_LEFTSHIFTED1_4 = {16,16,16,16, 0, 1, 2, 3,16,16,16,16,16,16,16,16};
+@@ -171,8 +153,9 @@ static const vector unsigned char VSX_SHORT_TO_CHAR4_3 = {16,16,16,16,16,16,16,1
+ #  define vsx_abs(number) (number > 0) ? (number) : -(number)
+ #endif
+ 
+-void png_read_filter_row_sub4_vsx(png_row_infop row_info, png_bytep row,
+-                                  png_const_bytep prev_row)
++static void
++png_read_filter_row_sub4_vsx(png_row_infop row_info, png_bytep row,
++   png_const_bytep prev_row)
+ {
+    png_byte bpp = 4;
+ 
+@@ -228,8 +211,9 @@ void png_read_filter_row_sub4_vsx(png_row_infop row_info, png_bytep row,
+ 
+ }
+ 
+-void png_read_filter_row_sub3_vsx(png_row_infop row_info, png_bytep row,
+-                                  png_const_bytep prev_row)
++static void
++png_read_filter_row_sub3_vsx(png_row_infop row_info, png_bytep row,
++   png_const_bytep prev_row)
+ {
+    png_byte bpp = 3;
+ 
+@@ -292,8 +276,9 @@ void png_read_filter_row_sub3_vsx(png_row_infop row_info, png_bytep row,
+       }
+ }
+ 
+-void png_read_filter_row_avg4_vsx(png_row_infop row_info, png_bytep row,
+-                                  png_const_bytep prev_row)
++static void
++png_read_filter_row_avg4_vsx(png_row_infop row_info, png_bytep row,
++   png_const_bytep prev_row)
+ {
+    png_byte bpp = 4;
+ 
+@@ -379,8 +364,9 @@ void png_read_filter_row_avg4_vsx(png_row_infop row_info, png_bytep row,
+       }
+ }
+ 
+-void png_read_filter_row_avg3_vsx(png_row_infop row_info, png_bytep row,
+-                                  png_const_bytep prev_row)
++static void
++png_read_filter_row_avg3_vsx(png_row_infop row_info, png_bytep row,
++   png_const_bytep prev_row)
+ {
+   png_byte bpp = 3;
+ 
+@@ -497,7 +483,8 @@ void png_read_filter_row_avg3_vsx(png_row_infop row_info, png_bytep row,
+       *rp++ = (png_byte)a;\
+       }
+ 
+-void png_read_filter_row_paeth4_vsx(png_row_infop row_info, png_bytep row,
++static void
++png_read_filter_row_paeth4_vsx(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev_row)
+ {
+    png_byte bpp = 4;
+@@ -617,7 +604,8 @@ void png_read_filter_row_paeth4_vsx(png_row_infop row_info, png_bytep row,
+       }
+ }
+ 
+-void png_read_filter_row_paeth3_vsx(png_row_infop row_info, png_bytep row,
++static void
++png_read_filter_row_paeth3_vsx(png_row_infop row_info, png_bytep row,
+    png_const_bytep prev_row)
+ {
+   png_byte bpp = 3;
+@@ -762,7 +750,3 @@ void png_read_filter_row_paeth3_vsx(png_row_infop row_info, png_bytep row,
+         vsx_paeth_process(rp,pp,a,b,c,pa,pb,pc,bpp)
+      }
+ }
+-
+-#endif /* PNG_POWERPC_VSX_OPT > 0 */
+-#endif /* PNG_POWERPC_VSX_IMPLEMENTATION == 1 (intrinsics) */
+-#endif /* READ */
+diff --git a/powerpc/powerpc_init.c b/powerpc/powerpc_init.c
+index 54426c558e..a0e540f3d8 100644
+--- a/powerpc/powerpc_init.c
++++ b/powerpc/powerpc_init.c
+@@ -1,4 +1,3 @@
+-
+ /* powerpc_init.c - POWERPC optimised filter functions
+  *
+  * Copyright (c) 2018 Cosmin Truta
+@@ -9,102 +8,19 @@
+  * For conditions of distribution and use, see the disclaimer
+  * and license in png.h
+  */
++#define png_target_impl "powerpc-vsx"
+ 
+-/* Below, after checking __linux__, various non-C90 POSIX 1003.1 functions are
+- * called.
+- */
+-#define _POSIX_SOURCE 1
+-
+-#include <stdio.h>
+-#include "../pngpriv.h"
++#include <altivec.h>
++#include "filter_vsx_intrinsics.c"
+ 
+-#ifdef PNG_READ_SUPPORTED
+-
+-#if PNG_POWERPC_VSX_OPT > 0
+-#ifdef PNG_POWERPC_VSX_CHECK_SUPPORTED /* Do run-time checks */
+-/* WARNING: it is strongly recommended that you do not build libpng with
+- * run-time checks for CPU features if at all possible.  In the case of the PowerPC
+- * VSX instructions there is no processor-specific way of detecting the
+- * presence of the required support, therefore run-time detection is extremely
+- * OS specific.
+- *
+- * You may set the macro PNG_POWERPC_VSX_FILE to the file name of file containing
+- * a fragment of C source code which defines the png_have_vsx function.  There
+- * are a number of implementations in contrib/powerpc-vsx, but the only one that
+- * has partial support is contrib/powerpc-vsx/linux.c - a generic Linux
+- * implementation which reads /proc/cpufino.
+- */
+-#ifndef PNG_POWERPC_VSX_FILE
+-#  ifdef __linux__
+-#     define  PNG_POWERPC_VSX_FILE "contrib/powerpc-vsx/linux_aux.c"
+-#  endif
+-#endif
+-
+-#ifdef PNG_POWERPC_VSX_FILE
+-
+-#include <signal.h> /* for sig_atomic_t */
+-static int png_have_vsx(png_structp png_ptr);
+-#include PNG_POWERPC_VSX_FILE
+-
+-#else  /* PNG_POWERPC_VSX_FILE */
+-#  error "PNG_POWERPC_VSX_FILE undefined: no support for run-time POWERPC VSX checks"
+-#endif /* PNG_POWERPC_VSX_FILE */
+-#endif /* PNG_POWERPC_VSX_CHECK_SUPPORTED */
+-
+-void
++static void
+ png_init_filter_functions_vsx(png_structp pp, unsigned int bpp)
+ {
+-   /* The switch statement is compiled in for POWERPC_VSX_API, the call to
+-    * png_have_vsx is compiled in for POWERPC_VSX_CHECK. If both are defined
+-    * the check is only performed if the API has not set the PowerPC option on
+-    * or off explicitly. In this case the check controls what happens.
+-    */
+-
+-#ifdef PNG_POWERPC_VSX_API_SUPPORTED
+-   switch ((pp->options >> PNG_POWERPC_VSX) & 3)
+-   {
+-      case PNG_OPTION_UNSET:
+-         /* Allow the run-time check to execute if it has been enabled -
+-          * thus both API and CHECK can be turned on.  If it isn't supported
+-          * this case will fall through to the 'default' below, which just
+-          * returns.
+-          */
+-#endif /* PNG_POWERPC_VSX_API_SUPPORTED */
+-#ifdef PNG_POWERPC_VSX_CHECK_SUPPORTED
+-         {
+-            static volatile sig_atomic_t no_vsx = -1; /* not checked */
+-
+-            if (no_vsx < 0)
+-               no_vsx = !png_have_vsx(pp);
+-
+-            if (no_vsx)
+-               return;
+-         }
+-#ifdef PNG_POWERPC_VSX_API_SUPPORTED
+-         break;
+-#endif
+-#endif /* PNG_POWERPC_VSX_CHECK_SUPPORTED */
+-
+-#ifdef PNG_POWERPC_VSX_API_SUPPORTED
+-      default: /* OFF or INVALID */
+-         return;
+-
+-      case PNG_OPTION_ON:
+-         /* Option turned on */
+-         break;
+-   }
+-#endif
+-
+-   /* IMPORTANT: any new internal functions used here must be declared using
+-    * PNG_INTERNAL_FUNCTION in ../pngpriv.h.  This is required so that the
+-    * 'prefix' option to configure works:
++   /* IMPORTANT: DO NOT DEFINE EXTERNAL FUNCTIONS HERE
+     *
+-    *    ./configure --with-libpng-prefix=foobar_
+-    *
+-    * Verify you have got this right by running the above command, doing a build
+-    * and examining pngprefix.h; it must contain a #define for every external
+-    * function you add.  (Notice that this happens automatically for the
+-    * initialization function.)
++    * This is because external functions must be declared with
++    * PNG_INTERNAL_FUNCTION in pngpriv.h; without this the PNG_PREFIX option to
++    * the build will not work (it will not know about these symbols).
+     */
+    pp->read_filter[PNG_FILTER_VALUE_UP-1] = png_read_filter_row_up_vsx;
+ 
+@@ -122,5 +38,5 @@ png_init_filter_functions_vsx(png_structp pp, unsigned int bpp)
+       pp->read_filter[PNG_FILTER_VALUE_PAETH-1] = png_read_filter_row_paeth4_vsx;
+    }
+ }
+-#endif /* PNG_POWERPC_VSX_OPT > 0 */
+-#endif /* READ */
++
++#define png_target_init_filter_functions_impl png_init_filter_functions_vsx
+diff --git a/scripts/makefile.gcc b/scripts/makefile.gcc
+index 67bc0d15e7..adae669c26 100644
+--- a/scripts/makefile.gcc
++++ b/scripts/makefile.gcc
+@@ -20,14 +20,12 @@ CP = cp
+ RM_F = rm -f
+ 
+ # Compiler and linker flags
+-NOHWOPT = -DPNG_ARM_NEON_OPT=0 -DPNG_MIPS_MSA_OPT=0 \
+-	-DPNG_POWERPC_VSX_OPT=0 -DPNG_INTEL_SSE_OPT=0
+ WARNMORE = -Wwrite-strings -Wpointer-arith -Wshadow \
+-	-Wmissing-declarations -Wtraditional -Wcast-align \
++	-Wmissing-declarations -Wcast-align \
+ 	-Wstrict-prototypes -Wmissing-prototypes # -Wconversion
+ DEFS = $(NOHWOPT)
+ CPPFLAGS = -I$(ZLIBINC) $(DEFS) # -DPNG_DEBUG=5
+-CFLAGS = -O2 -Wall -Wextra -Wundef # $(WARNMORE) -g
++CFLAGS = -O2 -Wall -Wextra -Wundef $(WARNMORE) -g
+ ARFLAGS = rc
+ LDFLAGS = -L$(ZLIBLIB) # -g
+ LIBS = -lz -lm
+@@ -42,7 +40,7 @@ PNGLIBCONF_H_PREBUILT = scripts/pnglibconf.h.prebuilt
+ # File lists
+ OBJS = png.o pngerror.o pngget.o pngmem.o pngpread.o \
+        pngread.o pngrio.o pngrtran.o pngrutil.o pngset.o \
+-       pngtrans.o pngwio.o pngwrite.o pngwtran.o pngwutil.o
++       pngsimd.o pngtrans.o pngwio.o pngwrite.o pngwtran.o pngwutil.o
+ 
+ # Targets
+ all: libpng.a pngtest$(EXEEXT)
+@@ -66,20 +64,25 @@ pngtest$(EXEEXT): pngtest.o libpng.a
+ clean:
+ 	$(RM_F) *.o libpng.a pngtest$(EXEEXT) pngout.png pnglibconf.h
+ 
+-png.o:      png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngerror.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngget.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngmem.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngpread.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngread.o:  png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngrio.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngrtran.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngrutil.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngset.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngtrans.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngwio.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngwrite.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngwtran.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngwutil.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
++#DEPENDENCIES: it is recommended that you use at least the gcc "-MD" option
++# and add some support here to include the generated dependency files.
++# unfortunately this cannot be done in a way that is independent of your
++# make implementation.
++
++png.o:      png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngerror.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngget.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngmem.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngpread.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngread.o:  png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngrio.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngrtran.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngrutil.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngset.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngtrans.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngwio.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngwrite.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngwtran.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngwutil.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
+ 
+ pngtest.o:  png.h pngconf.h pnglibconf.h
+diff --git a/scripts/makefile.std b/scripts/makefile.std
+index 6d69bf586b..ba7adda03c 100644
+--- a/scripts/makefile.std
++++ b/scripts/makefile.std
+@@ -22,8 +22,6 @@ MV_F = mv -f
+ RM_F = rm -f
+ AWK = awk
+ 
+-NOHWOPT = -DPNG_ARM_NEON_OPT=0 -DPNG_MIPS_MSA_OPT=0 \
+-	-DPNG_POWERPC_VSX_OPT=0 -DPNG_INTEL_SSE_OPT=0
+ DFNFLAGS = # DFNFLAGS contains -D options to use in the libpng build
+ DFA_EXTRA = # extra files that can be used to control configuration
+ CPPFLAGS = -I$(ZLIBINC) $(NOHWOPT) # -DPNG_DEBUG=5
+@@ -38,7 +36,7 @@ PNGLIBCONF_H_PREBUILT = scripts/pnglibconf.h.prebuilt
+ 
+ OBJS = png.o pngerror.o pngget.o pngmem.o pngpread.o \
+        pngread.o pngrio.o pngrtran.o pngrutil.o pngset.o \
+-       pngtrans.o pngwio.o pngwrite.o pngwtran.o pngwutil.o
++       pngsimd.o pngtrans.o pngwio.o pngwrite.o pngwtran.o pngwutil.o
+ 
+ .c.o:
+ 	$(CC) -c $(CPPFLAGS) $(CFLAGS) -o $@ $<
+@@ -85,20 +83,21 @@ clean:
+ 
+ # DO NOT DELETE THIS LINE -- make depend depends on it.
+ 
+-png.o:      png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngerror.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngget.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngmem.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngpread.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngread.o:  png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngrio.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngrtran.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngrutil.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngset.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngtrans.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngwio.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngwrite.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngwtran.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
+-pngwutil.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h
++png.o:      png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngerror.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngget.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngmem.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngpread.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngread.o:  png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngrio.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngrtran.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngrutil.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngset.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngsimd.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngtrans.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngwio.o:   png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngwrite.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngwtran.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
++pngwutil.o: png.h pngconf.h pnglibconf.h pngpriv.h pngstruct.h pnginfo.h pngdebug.h pngtarget.h
+ 
+ pngtest.o:  png.h pngconf.h pnglibconf.h
+diff --git a/scripts/pnglibconf.dfa b/scripts/pnglibconf.dfa
+index 3de27b5928..ee81b5d7a1 100644
+--- a/scripts/pnglibconf.dfa
++++ b/scripts/pnglibconf.dfa
+@@ -197,142 +197,6 @@ setting API_RULE default 0
+ 
+ setting PREFIX
+ 
+-# Implementation specific control of the optimizations, enabled by those
+-# hardware or software options that need it (typically when run-time choices
+-# must be made by the user)
+-option SET_OPTION disabled
+-
+-# These options are specific to the ARM NEON hardware optimizations.  At present
+-# these optimizations depend on GCC specific pre-processing of an assembler (.S)
+-# file, so they probably won't work with other compilers.
+-#
+-# ARM_NEON_OPT:
+-#   unset: check at compile time
+-#          (__ARM_NEON__ must be predefined by the compiler, as a result of
+-#          passing "-mfpu=neon" to the compiler options)
+-#   0: disable (even if the CPU has a NEON FPU)
+-#   1: check at run time (via ARM_NEON_{API,CHECK})
+-#   2: switch on unconditionally
+-#      (inadvisable - instead, pass "-mfpu=neon" to the compiler)
+-#   NOTE:
+-#     When building libpng, avoid using any setting other than '0';
+-#     '1' is set automatically when either 'API' or 'CHECK' are configured in;
+-#     '2' should not be necessary, as "-mfpu=neon" will achieve the same effect
+-#     as well as applying the NEON optimizations to the rest of libpng.
+-#   NOTE:
+-#     Any setting other than '0' requires ALIGNED_MEMORY.
+-#
+-# ARM_NEON_API:
+-#   (PNG_ARM_NEON == 1)
+-#   Allow the optimization to be switched on with png_set_option.
+-#
+-# ARM_NEON_CHECK:
+-#   (PNG_ARM_NEON == 1)
+-#   Compile a run-time check to see if Neon extensions are supported.
+-#   This is poorly supported and deprecated - use the png_set_option API.
+-#
+-setting ARM_NEON_OPT
+-option ARM_NEON_API disabled requires ALIGNED_MEMORY enables SET_OPTION,
+-   sets ARM_NEON_OPT 1
+-option ARM_NEON_CHECK disabled requires ALIGNED_MEMORY,
+-   sets ARM_NEON_OPT 1
+-
+-# These options are specific to the PowerPC VSX hardware optimizations.
+-#
+-# POWERPC_VSX_OPT:
+-#   unset: check at compile time
+-#          (__PPC64__,__ALTIVEC__,__VSX__ must be predefined by the compiler,
+-#          as a result of passing "-mvsx -maltivec" to the compiler options)
+-#   0: disable (even if the CPU supports VSX)
+-#   1: check at run time (via POWERPC_VSX_{API,CHECK})
+-#   2: switch on unconditionally
+-#      (inadvisable - instead, pass "-mvsx -maltivec" to the compiler)
+-#   NOTE:
+-#     When building libpng, avoid using any setting other than '0';
+-#     '1' is set automatically when either 'API' or 'CHECK' are configured in;
+-#     '2' should not be necessary, as "-mvsx -maltivec" will achieve the same
+-#     effect as well as applying the VSX optimizations to the rest of libpng.
+-#
+-# POWERPC_VSX_API:
+-#   (PNG_POWERPC_VSX == 1)
+-#   Allow the optimization to be switched on with png_set_option.
+-#
+-# POWERPC_VSX_CHECK:
+-#   (PNG_POWERPC_VSX == 1)
+-#   Compile a run-time check to see if VSX extensions are supported.
+-#   This is not supported on all systems. See contrib/powerpc-vsx/README.
+-#
+-setting POWERPC_VSX_OPT
+-option POWERPC_VSX_API disabled enables SET_OPTION,
+-  sets POWERPC_VSX_OPT 1
+-option POWERPC_VSX_CHECK disabled,
+-  sets POWERPC_VSX_OPT 1
+-
+-# These options are specific to the MIPS MSA hardware optimizations.
+-#
+-# MIPS_MSA_OPT:
+-#   unset: check at compile time
+-#          (__mips_msa must be predefined by the compiler, as a result of
+-#          passing "-mmsa -mfp64" to the compiler options)
+-#   0: disable (even if the CPU supports MSA)
+-#   1: check at run time (via MIPS_MSA_{API,CHECK})
+-#   2: switch on unconditionally
+-#      (inadvisable - instead, pass "-mmsa -mfp64" to the compiler)
+-#   NOTE:
+-#     When building libpng, avoid using any setting other than '0';
+-#     '1' is set automatically when either 'API' or 'CHECK' are configured in;
+-#     '2' should not be necessary, as "-mmsa -mfp64" will achieve the same
+-#     effect as well as applying the MSA optimizations to the rest of libpng.
+-#   NOTE:
+-#     Any setting other than '0' requires ALIGNED_MEMORY.
+-#
+-# MIPS_MSA_API:
+-#   (PNG_MIPS_MSA == 1)
+-#   Allow the optimization to be switched on with png_set_option.
+-#
+-# MIPS_MSA_CHECK:
+-#   (PNG_MIPS_MSA == 1)
+-#   Compile a run-time check to see if MSA extensions are supported.
+-#
+-setting MIPS_MSA_OPT
+-option MIPS_MSA_API disabled requires ALIGNED_MEMORY enables SET_OPTION,
+-  sets MIPS_MSA_OPT 1
+-option MIPS_MSA_CHECK disabled requires ALIGNED_MEMORY,
+-  sets MIPS_MSA_OPT 1
+-
+-# These options are specific to the MIPS MMI hardware optimizations.
+-#
+-# MIPS_MMI_OPT:
+-#   unset: check at compile time
+-#          (__mips_loongson_mmi must be defined by the compiler, as a result of
+-#          passing "-mloongson-mmi -march=loongson3a" to the compiler options)
+-#   0: disable (even if the CPU supports MMI)
+-#   1: check at run time (via MIPS_MMI_{API,CHECK})
+-#   2: switch on unconditionally
+-#      (inadvisable - instead, pass "-mloongson-mmi -march=loongson3a" to the
+-#      compiler)
+-#   NOTE:
+-#     When building libpng, avoid using any setting other than '0';
+-#     '1' is set automatically when either 'API' or 'CHECK' are configured in;
+-#     '2' should not be necessary, as "-mloongson-mmi -march=loongson3a" will
+-#     achieve the same effect as well as applying the MMI optimizations to the
+-#     rest of libpng.
+-#
+-# MIPS_MMI_API:
+-#   (PNG_MIPS_MMI == 1)
+-#   Allow the optimization to be switched on with png_set_option.
+-#
+-# MIPS_MMI_CHECK:
+-#   (PNG_MIPS_MMI == 1)
+-#   Compile a run-time check to see if MMI extensions are supported.
+-#
+-setting MIPS_MMI_OPT
+-option MIPS_MMI_API disabled requires ALIGNED_MEMORY enables SET_OPTION,
+-  sets MIPS_MMI_OPT 1
+-option MIPS_MMI_CHECK disabled requires ALIGNED_MEMORY,
+-  sets MIPS_MMI_OPT 1
+-
+-
+ # These settings configure the default compression level (0-9) and 'strategy';
+ # strategy is as defined by the implementors of zlib. It describes the input
+ # data and modifies the zlib parameters in an attempt to optimize the balance
+@@ -432,7 +296,7 @@ option BENIGN_READ_ERRORS requires BENIGN_ERRORS
+ # Furthermore the option is explicitly turned off here if the zlib version
+ # number is below that required - libpng wouldn't compile in that case if the
+ # option were turned on.
+-option DISABLE_ADLER32_CHECK requires READ enables SET_OPTION disabled
++option DISABLE_ADLER32_CHECK requires READ disabled
+ 
+ # ZLIB_VERNUM must be used here, not PNG_ZLIB_VERNUM, because
+ # scripts/options.awk ends up putting this test adhead of the setting of
+@@ -544,7 +408,7 @@ option SET_USER_LIMITS requires USER_LIMITS
+ # to libpng 1.6; the new interfaces in 1.6 will take several years to become
+ # popular.
+ 
+-option READ enables READ_INTERLACING SET_OPTION
++option READ enables READ_INTERLACING
+ 
+ # Disabling READ_16BIT does not disable reading 16-bit PNG files, but it
+ # forces them to be chopped down to 8-bit, and disables any 16-bit
+@@ -754,13 +618,6 @@ option COLORSPACE enables GAMMA disabled
+ 
+ setting sRGB_PROFILE_CHECKS default 2
+ 
+-# Artificially align memory - the code typically aligns to 8 byte
+-# boundaries if this is switched on, it's a small waste of space
+-# but can help (in theory) on some architectures.  Only affects
+-# internal structures.  Added at libpng 1.4.0
+-
+-option ALIGNED_MEMORY
+-
+ # Buggy compilers (e.g., gcc 2.7.2.2) need PNG_NO_POINTER_INDEXING
+ # See png[wr]util.c, normally this should always be *on*
+ 
+@@ -841,6 +698,16 @@ setting INFLATE_BUF_SIZE default 1024
+ 
+ setting IDAT_READ_SIZE default PNG_ZBUF_SIZE
+ 
++# Target specific code.  By default libpng will use "target specific" code if
++# available.  This means code that depends on particular capabilities of a CPU
++# and its instruction set.  This configuration option is provided to allow
++# such code to be completely disabled.  See pngsimd.c for more discussion about
++# the advantages and disadvantages of target specific code.
++#
++# At present target specific code is available only for read operations, so:
++
++option TARGET_SPECIFIC_CODE requires READ
++
+ # Ancillary chunks
+ chunk bKGD
+ chunk cHRM enables COLORSPACE
+@@ -856,7 +723,7 @@ chunk pHYs
+ chunk sBIT
+ chunk sCAL
+ chunk sPLT
+-chunk sRGB enables COLORSPACE, GAMMA, SET_OPTION
++chunk sRGB enables COLORSPACE, GAMMA
+ chunk tEXt requires TEXT
+ chunk tIME
+ chunk tRNS
+diff --git a/scripts/pnglibconf.h.prebuilt b/scripts/pnglibconf.h.prebuilt
+index adfbf264fc..72ed4cd893 100644
+--- a/scripts/pnglibconf.h.prebuilt
++++ b/scripts/pnglibconf.h.prebuilt
+@@ -16,9 +16,6 @@
+ #define PNGLCONF_H
+ /* options */
+ #define PNG_16BIT_SUPPORTED
+-#define PNG_ALIGNED_MEMORY_SUPPORTED
+-/*#undef PNG_ARM_NEON_API_SUPPORTED*/
+-/*#undef PNG_ARM_NEON_CHECK_SUPPORTED*/
+ #define PNG_BENIGN_ERRORS_SUPPORTED
+ #define PNG_BENIGN_READ_ERRORS_SUPPORTED
+ /*#undef PNG_BENIGN_WRITE_ERRORS_SUPPORTED*/
+@@ -42,14 +39,8 @@
+ #define PNG_INCH_CONVERSIONS_SUPPORTED
+ #define PNG_INFO_IMAGE_SUPPORTED
+ #define PNG_IO_STATE_SUPPORTED
+-/*#undef PNG_MIPS_MMI_API_SUPPORTED*/
+-/*#undef PNG_MIPS_MMI_CHECK_SUPPORTED*/
+-/*#undef PNG_MIPS_MSA_API_SUPPORTED*/
+-/*#undef PNG_MIPS_MSA_CHECK_SUPPORTED*/
+ #define PNG_MNG_FEATURES_SUPPORTED
+ #define PNG_POINTER_INDEXING_SUPPORTED
+-/*#undef PNG_POWERPC_VSX_API_SUPPORTED*/
+-/*#undef PNG_POWERPC_VSX_CHECK_SUPPORTED*/
+ #define PNG_PROGRESSIVE_READ_SUPPORTED
+ #define PNG_READ_16BIT_SUPPORTED
+ #define PNG_READ_ALPHA_MODE_SUPPORTED
+@@ -109,7 +100,6 @@
+ #define PNG_SAVE_UNKNOWN_CHUNKS_SUPPORTED
+ #define PNG_SEQUENTIAL_READ_SUPPORTED
+ #define PNG_SETJMP_SUPPORTED
+-#define PNG_SET_OPTION_SUPPORTED
+ #define PNG_SET_UNKNOWN_CHUNKS_SUPPORTED
+ #define PNG_SET_USER_LIMITS_SUPPORTED
+ #define PNG_SIMPLIFIED_READ_AFIRST_SUPPORTED
+@@ -121,6 +111,7 @@
+ #define PNG_SIMPLIFIED_WRITE_SUPPORTED
+ #define PNG_STDIO_SUPPORTED
+ #define PNG_STORE_UNKNOWN_CHUNKS_SUPPORTED
++#define PNG_TARGET_SPECIFIC_CODE_SUPPORTED
+ #define PNG_TEXT_SUPPORTED
+ #define PNG_TIME_RFC1123_SUPPORTED
+ #define PNG_UNKNOWN_CHUNKS_SUPPORTED
